@@ -1,4 +1,8 @@
+import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../auth/login_screen.dart';
+import '../navigation/main_nav_shell.dart';
 import '../onboarding/onboarding_screen.dart';
 import '../../core/theme/app_colors.dart';
 
@@ -14,6 +18,7 @@ class _SplashScreenState extends State<SplashScreen>
   late AnimationController _ctrl;
   late Animation<double> _scale;
   late Animation<double> _fade;
+  bool _seenOnboarding = false;
 
   @override
   void initState() {
@@ -26,6 +31,38 @@ class _SplashScreenState extends State<SplashScreen>
       CurvedAnimation(parent: _ctrl, curve: const Interval(0.0, 0.5)),
     );
     _ctrl.forward();
+    _checkOnboarding();
+  }
+
+  Future<void> _checkOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    final seen = prefs.getBool('driver_seen_onboarding') ?? false;
+    if (!mounted) return;
+    setState(() => _seenOnboarding = seen);
+    if (seen) {
+      // Already saw onboarding — skip straight to login (or straight into the
+      // app if a Firebase session is already active) after the animation.
+      Future.delayed(const Duration(milliseconds: 1600), () {
+        if (!mounted) return;
+        final loggedIn = fb.FirebaseAuth.instance.currentUser != null;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => loggedIn ? const MainNavShell() : const DriverLoginScreen(),
+          ),
+        );
+      });
+    }
+  }
+
+  Future<void> _startOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('driver_seen_onboarding', true);
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+    );
   }
 
   @override
@@ -133,56 +170,49 @@ class _SplashScreenState extends State<SplashScreen>
               ),
             ),
           ),
-          // Bottom buttons
-          Positioned(
-            bottom: 48,
-            left: 24,
-            right: 24,
-            child: FadeTransition(
-              opacity: _fade,
-              child: Column(
-                children: [
-                  _buildBtn(
-                    'Get Started',
-                    onTap: () => Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const OnboardingScreen(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  GestureDetector(
-                    onTap: () => Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const OnboardingScreen(startAtLogin: true),
-                      ),
-                    ),
-                    child: RichText(
-                      text: const TextSpan(
-                        text: 'Already a driver? ',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          color: AppColors.darkSubText,
+          // Bottom buttons — hidden on repeat launches (auto-routed to login)
+          if (!_seenOnboarding)
+            Positioned(
+              bottom: 48,
+              left: 24,
+              right: 24,
+              child: FadeTransition(
+                opacity: _fade,
+                child: Column(
+                  children: [
+                    _buildBtn('Get Started', onTap: _startOnboarding),
+                    const SizedBox(height: 12),
+                    GestureDetector(
+                      onTap: () => Navigator.pushReplacement(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const DriverLoginScreen(),
                         ),
-                        children: [
-                          TextSpan(
-                            text: 'Sign in',
-                            style: TextStyle(
-                              color: AppColors.orange,
-                              fontWeight: FontWeight.w700,
-                            ),
+                      ),
+                      child: RichText(
+                        text: const TextSpan(
+                          text: 'Already a driver? ',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: AppColors.darkSubText,
                           ),
-                        ],
+                          children: [
+                            TextSpan(
+                              text: 'Sign in',
+                              style: TextStyle(
+                                color: AppColors.orange,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

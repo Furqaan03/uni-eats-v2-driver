@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
+import '../../core/providers/driver_auth_provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../navigation/main_nav_shell.dart';
 
@@ -13,7 +15,15 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
-  int _step = 0; // 0=phone, 1=otp, 2=profile, 3=docs, 4=review
+  int _step = 0; // 0=phone, 1=profile, 2=docs, 3=review
+
+  String _phone = '';
+  String _name = '';
+  String _studentId = '';
+  String _email = '';
+  String _password = '';
+  bool _submitting = false;
+  String? _submitError;
 
   @override
   void initState() {
@@ -22,18 +32,40 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   void _next() {
-    if (_step < 4) {
+    if (_step < 3) {
       setState(() => _step++);
     } else {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const MainNavShell()),
-      );
+      _finishSignup();
     }
   }
 
   void _back() {
     if (_step > 0) setState(() => _step--);
+  }
+
+  Future<void> _finishSignup() async {
+    setState(() {
+      _submitting = true;
+      _submitError = null;
+    });
+    final result = await context.read<DriverAuthProvider>().signUp(
+          name: _name,
+          email: _email,
+          password: _password,
+          phone: _phone,
+          studentId: _studentId,
+        );
+    if (!mounted) return;
+    setState(() => _submitting = false);
+    if (result == null) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const MainNavShell()),
+      );
+    } else {
+      setState(() => _submitError = result);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result)));
+    }
   }
 
   @override
@@ -55,18 +87,35 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Widget _buildStep() {
     switch (_step) {
       case 0:
-        return _PhoneStep(onNext: _next, onBack: _back, step: 1);
+        return _PhoneStep(
+          onNext: _next,
+          onBack: _back,
+          step: 1,
+          onCaptured: (phone) => _phone = phone,
+          onSocialSignedIn: () => Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const MainNavShell()),
+          ),
+        );
       case 1:
-        return _OtpStep(onNext: _next, onBack: _back);
+        return _ProfileStep(
+          onNext: _next,
+          onBack: _back,
+          onCaptured: ({required name, required studentId, required email, required password}) {
+            _name = name;
+            _studentId = studentId;
+            _email = email;
+            _password = password;
+          },
+        );
       case 2:
-        return _ProfileStep(onNext: _next, onBack: _back);
-      case 3:
         return _DocsStep(onNext: _next, onBack: _back);
-      case 4:
-        return _ReviewStep(onFinish: () => Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const MainNavShell()),
-        ));
+      case 3:
+        return _ReviewStep(
+          onFinish: _next,
+          submitting: _submitting,
+          error: _submitError,
+        );
       default:
         return const SizedBox();
     }
@@ -77,7 +126,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 class _PhoneStep extends StatefulWidget {
   final VoidCallback onNext, onBack;
   final int step;
-  const _PhoneStep({required this.onNext, required this.onBack, required this.step});
+  final ValueChanged<String> onCaptured;
+  /// Called when a social provider (Google/Apple) completes sign-in —
+  /// the user is already fully authenticated, so onboarding can be skipped
+  /// entirely rather than asking them to set a password too.
+  final VoidCallback onSocialSignedIn;
+  const _PhoneStep({
+    required this.onNext,
+    required this.onBack,
+    required this.step,
+    required this.onCaptured,
+    required this.onSocialSignedIn,
+  });
 
   @override
   State<_PhoneStep> createState() => _PhoneStepState();
@@ -94,76 +154,57 @@ class _PhoneStepState extends State<_PhoneStep> {
     super.dispose();
   }
 
-  Future<void> _sendCode() async {
+  Future<void> _continue() async {
     final phone = _phoneCtrl.text.trim();
     if (phone.length < 8) {
       setState(() => _error = 'Enter a valid 8-digit number');
       return;
     }
-    setState(() { _loading = true; _error = null; });
-
-    // TODO: Firebase Phone Auth — uncomment when Firebase is configured:
-    //
-    // await FirebaseAuth.instance.verifyPhoneNumber(
-    //   phoneNumber: '+974$phone',
-    //   verificationCompleted: (PhoneAuthCredential credential) async {
-    //     await FirebaseAuth.instance.signInWithCredential(credential);
-    //     widget.onNext();
-    //   },
-    //   verificationFailed: (FirebaseAuthException e) {
-    //     setState(() { _error = e.message; _loading = false; });
-    //   },
-    //   codeSent: (String verificationId, int? resendToken) {
-    //     // Store verificationId for OTP step, then navigate
-    //     widget.onNext();
-    //   },
-    //   codeAutoRetrievalTimeout: (String verificationId) {},
-    // );
-
-    // Temporary: skip straight to OTP step
-    await Future.delayed(const Duration(milliseconds: 600));
-    setState(() => _loading = false);
+    // Phone number is collected for contact/delivery purposes only — actual
+    // identity verification happens via Google/Apple sign-in or the
+    // email+password account created in the Profile step.
+    widget.onCaptured(phone);
     widget.onNext();
   }
 
   Future<void> _signInWithGoogle() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
 
-    // TODO: Google Sign-In — uncomment when packages are added:
-    //
-    // final googleUser = await GoogleSignIn().signIn();
-    // if (googleUser == null) { setState(() => _loading = false); return; }
-    // final googleAuth = await googleUser.authentication;
-    // final credential = GoogleAuthProvider.credential(
-    //   accessToken: googleAuth.accessToken,
-    //   idToken: googleAuth.idToken,
-    // );
-    // await FirebaseAuth.instance.signInWithCredential(credential);
-    // widget.onNext();
+    final error = await context.read<DriverAuthProvider>().signInWithGoogle();
 
-    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
     setState(() => _loading = false);
-    widget.onNext();
+
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    // Google sign-in already authenticated + identified the driver —
+    // skip the rest of onboarding (OTP/profile/password) entirely.
+    widget.onSocialSignedIn();
   }
 
   Future<void> _signInWithApple() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
 
-    // TODO: Apple Sign-In — uncomment when packages are added:
-    //
-    // final appleCredential = await SignInWithApple.getAppleIDCredential(
-    //   scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
-    // );
-    // final oauthCredential = OAuthProvider('apple.com').credential(
-    //   idToken: appleCredential.identityToken,
-    //   accessToken: appleCredential.authorizationCode,
-    // );
-    // await FirebaseAuth.instance.signInWithCredential(oauthCredential);
-    // widget.onNext();
+    final error = await context.read<DriverAuthProvider>().signInWithApple();
 
-    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
     setState(() => _loading = false);
-    widget.onNext();
+
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    // Apple sign-in already authenticated + identified the driver — skip
+    // the rest of onboarding (profile/password) entirely.
+    widget.onSocialSignedIn();
   }
 
   @override
@@ -191,7 +232,7 @@ class _PhoneStepState extends State<_PhoneStep> {
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    "We'll send a code to verify it's you.",
+                    "So customers and support can reach you.",
                     style: TextStyle(fontSize: 13, color: AppColors.darkSubText),
                   ),
                   const SizedBox(height: 24),
@@ -290,8 +331,8 @@ class _PhoneStepState extends State<_PhoneStep> {
                   ),
                   const SizedBox(height: 32),
                   _OrangeCta(
-                    label: _loading ? 'Sending…' : 'Send Verification Code →',
-                    onTap: _loading ? () {} : _sendCode,
+                    label: 'Continue →',
+                    onTap: _loading ? () {} : _continue,
                   ),
                   const SizedBox(height: 10),
                   const Center(
@@ -323,252 +364,16 @@ class _PhoneStepState extends State<_PhoneStep> {
       );
 }
 
-// ─── Step 2: OTP ─────────────────────────────────────────────────────────────
-class _OtpStep extends StatefulWidget {
-  final VoidCallback onNext, onBack;
-  const _OtpStep({required this.onNext, required this.onBack});
-
-  @override
-  State<_OtpStep> createState() => _OtpStepState();
-}
-
-class _OtpStepState extends State<_OtpStep> {
-  final List<TextEditingController> _ctrls =
-      List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _nodes = List.generate(6, (_) => FocusNode());
-  bool _loading = false;
-  String? _error;
-  int _resendSeconds = 59;
-
-  @override
-  void initState() {
-    super.initState();
-    _startResendTimer();
-  }
-
-  void _startResendTimer() async {
-    while (mounted && _resendSeconds > 0) {
-      await Future.delayed(const Duration(seconds: 1));
-      if (mounted) setState(() => _resendSeconds--);
-    }
-  }
-
-  String get _otp => _ctrls.map((c) => c.text).join();
-
-  Future<void> _verify() async {
-    if (_otp.length < 6) {
-      setState(() => _error = 'Enter all 6 digits');
-      return;
-    }
-    setState(() { _loading = true; _error = null; });
-
-    // TODO: Firebase OTP verification — uncomment when Firebase is configured:
-    //
-    // final credential = PhoneAuthProvider.credential(
-    //   verificationId: verificationId, // passed from _PhoneStep
-    //   smsCode: _otp,
-    // );
-    // try {
-    //   await FirebaseAuth.instance.signInWithCredential(credential);
-    //   widget.onNext();
-    // } on FirebaseAuthException catch (e) {
-    //   setState(() { _error = e.message; _loading = false; });
-    // }
-
-    await Future.delayed(const Duration(milliseconds: 800));
-    setState(() => _loading = false);
-    widget.onNext();
-  }
-
-  @override
-  void dispose() {
-    for (final c in _ctrls) { c.dispose(); }
-    for (final n in _nodes) { n.dispose(); }
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Header(onBack: widget.onBack, step: 1, total: 3),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Enter the code',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.darkText,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text('Sent to your phone via SMS',
-                      style: TextStyle(fontSize: 13, color: AppColors.darkSubText)),
-                  const SizedBox(height: 28),
-                  // 6 OTP boxes
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: List.generate(6, (i) => _OtpBox(
-                      controller: _ctrls[i],
-                      focusNode: _nodes[i],
-                      onChanged: (val) {
-                        if (val.isNotEmpty && i < 5) {
-                          _nodes[i + 1].requestFocus();
-                        } else if (val.isEmpty && i > 0) {
-                          _nodes[i - 1].requestFocus();
-                        }
-                        setState(() => _error = null);
-                        if (_otp.length == 6) _verify();
-                      },
-                    )),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 10),
-                    Text(_error!,
-                        style: const TextStyle(fontSize: 12, color: AppColors.red)),
-                  ],
-                  const SizedBox(height: 20),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: AppColors.darkCard,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.darkBorder),
-                    ),
-                    child: Row(
-                      children: [
-                        const Text('💬', style: TextStyle(fontSize: 18)),
-                        const SizedBox(width: 10),
-                        const Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Code sent via SMS',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.darkText,
-                              ),
-                            ),
-                            Text(
-                              'Check your messages app',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: AppColors.darkSubText,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        _resendSeconds > 0
-                            ? '⏱ Resend in 00:${_resendSeconds.toString().padLeft(2, '0')}'
-                            : 'Didn\'t receive it?',
-                        style: const TextStyle(fontSize: 12, color: AppColors.darkSubText),
-                      ),
-                      GestureDetector(
-                        onTap: _resendSeconds == 0
-                            ? () {
-                                setState(() => _resendSeconds = 59);
-                                _startResendTimer();
-                                // TODO: call Firebase verifyPhoneNumber again to resend
-                              }
-                            : null,
-                        child: Text(
-                          'Resend Code',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: _resendSeconds == 0
-                                ? AppColors.darkText
-                                : AppColors.darkSubText,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  _OrangeCta(
-                    label: _loading ? 'Verifying…' : 'Verify →',
-                    onTap: _loading ? () {} : _verify,
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _OtpBox extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final ValueChanged<String> onChanged;
-  const _OtpBox({
-    required this.controller,
-    required this.focusNode,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 46,
-      height: 56,
-      child: TextField(
-        controller: controller,
-        focusNode: focusNode,
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        maxLength: 1,
-        style: const TextStyle(
-          fontSize: 22,
-          fontWeight: FontWeight.w800,
-          color: AppColors.darkText,
-        ),
-        decoration: InputDecoration(
-          counterText: '',
-          filled: true,
-          fillColor: AppColors.darkCard,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: AppColors.orange),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: AppColors.darkBorder),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: AppColors.orange, width: 2),
-          ),
-        ),
-        onChanged: onChanged,
-      ),
-    );
-  }
-}
-
-// ─── Step 3: Profile ─────────────────────────────────────────────────────────
+// ─── Step 2: Profile ─────────────────────────────────────────────────────────
 class _ProfileStep extends StatefulWidget {
   final VoidCallback onNext, onBack;
-  const _ProfileStep({required this.onNext, required this.onBack});
+  final void Function({
+    required String name,
+    required String studentId,
+    required String email,
+    required String password,
+  }) onCaptured;
+  const _ProfileStep({required this.onNext, required this.onBack, required this.onCaptured});
 
   @override
   State<_ProfileStep> createState() => _ProfileStepState();
@@ -577,17 +382,24 @@ class _ProfileStep extends StatefulWidget {
 class _ProfileStepState extends State<_ProfileStep> {
   final _nameCtrl = TextEditingController();
   final _idCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
   String _campus = 'UDST';
   XFile? _photo;
   String? _nameError;
+  String? _emailError;
+  String? _passwordError;
 
   final _campuses = ['UDST'];
   static final _nameRegex = RegExp(r"^[a-zA-Z\- ]+$");
+  static final _emailRegex = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
   @override
   void dispose() {
     _nameCtrl.dispose();
     _idCtrl.dispose();
+    _emailCtrl.dispose();
+    _passwordCtrl.dispose();
     super.dispose();
   }
 
@@ -620,6 +432,14 @@ class _ProfileStepState extends State<_ProfileStep> {
 
   void _submit() {
     final name = _nameCtrl.text.trim();
+    final email = _emailCtrl.text.trim();
+    final password = _passwordCtrl.text;
+    setState(() {
+      _nameError = null;
+      _emailError = null;
+      _passwordError = null;
+    });
+
     if (name.length < 3) {
       setState(() => _nameError = 'Enter your full name');
       return;
@@ -628,6 +448,21 @@ class _ProfileStepState extends State<_ProfileStep> {
       setState(() => _nameError = 'Name can only contain letters and hyphens');
       return;
     }
+    if (!_emailRegex.hasMatch(email)) {
+      setState(() => _emailError = 'Enter a valid email address');
+      return;
+    }
+    if (password.length < 6) {
+      setState(() => _passwordError = 'Password must be at least 6 characters');
+      return;
+    }
+
+    widget.onCaptured(
+      name: name,
+      studentId: _idCtrl.text.trim(),
+      email: email,
+      password: password,
+    );
     widget.onNext();
   }
 
@@ -784,6 +619,76 @@ class _ProfileStepState extends State<_ProfileStep> {
                         borderSide: const BorderSide(color: AppColors.orange, width: 2),
                       ),
                     ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Email ──
+                  _label('EMAIL'),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.lightText,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: 'you@example.com',
+                      hintStyle: const TextStyle(color: AppColors.lightSubText),
+                      filled: true,
+                      fillColor: AppColors.lightSurface,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.lightBorder),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.lightBorder),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.orange, width: 2),
+                      ),
+                      errorText: _emailError,
+                    ),
+                    onChanged: (_) => setState(() => _emailError = null),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── Password ──
+                  _label('PASSWORD'),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _passwordCtrl,
+                    obscureText: true,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.lightText,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: 'At least 6 characters',
+                      hintStyle: const TextStyle(color: AppColors.lightSubText),
+                      filled: true,
+                      fillColor: AppColors.lightSurface,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.lightBorder),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.lightBorder),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: AppColors.orange, width: 2),
+                      ),
+                      errorText: _passwordError,
+                    ),
+                    onChanged: (_) => setState(() => _passwordError = null),
                   ),
                   const SizedBox(height: 16),
 
@@ -1248,7 +1153,9 @@ class _DocsStepState extends State<_DocsStep> {
 // ─── Step 5: Under Review ────────────────────────────────────────────────────
 class _ReviewStep extends StatelessWidget {
   final VoidCallback onFinish;
-  const _ReviewStep({required this.onFinish});
+  final bool submitting;
+  final String? error;
+  const _ReviewStep({required this.onFinish, this.submitting = false, this.error});
 
   @override
   Widget build(BuildContext context) {
@@ -1308,7 +1215,7 @@ class _ReviewStep extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-                    _reviewRow('✓', 'Account created', 'Verified via phone', AppColors.green),
+                    _reviewRow('✓', 'Account created', 'Verified via email/social sign-in', AppColors.green),
                     const SizedBox(height: 12),
                     _reviewRow('✓', 'Profile submitted', '2 of 4 docs uploaded', AppColors.green),
                     const SizedBox(height: 12),
@@ -1322,13 +1229,21 @@ class _ReviewStep extends StatelessWidget {
                 ),
               ),
               const Spacer(),
+              if (error != null) ...[
+                Text(
+                  error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: AppColors.red, fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+              ],
               _OrangeCta(
-                label: '📤 Upload Remaining Docs',
-                onTap: onFinish,
+                label: submitting ? 'Creating account…' : 'Finish & Continue',
+                onTap: submitting ? () {} : onFinish,
               ),
               const SizedBox(height: 10),
               GestureDetector(
-                onTap: onFinish,
+                onTap: submitting ? () {} : onFinish,
                 child: RichText(
                   text: const TextSpan(
                     text: 'Questions? ',

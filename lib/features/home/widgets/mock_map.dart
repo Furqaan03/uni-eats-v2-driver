@@ -1,25 +1,55 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import '../../../core/theme/app_colors.dart';
 
-/// A static custom-painted mock map so we don't need a Maps API key.
+/// University of Doha for Science and Technology, Qatar — real-world anchor
+/// point for the campus map. Building-level positions aren't geocoded yet,
+/// so this just centers the live map on campus rather than plotting exact
+/// per-building markers.
+const _udstCampus = LatLng(25.3245, 51.4280);
+
+/// Real OpenStreetMap-tiled map (no API key required) showing the driver's
+/// approximate position, replacing the previous custom-painted fake map.
 class MockMap extends StatelessWidget {
   final bool isDark;
   const MockMap({super.key, required this.isDark});
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _MapPainter(isDark: isDark),
-      child: Stack(
+    return ColorFiltered(
+      // Subtle dark-mode tint so the map matches the app's theme without
+      // needing a separate dark tile provider.
+      colorFilter: isDark
+          ? const ColorFilter.matrix(<double>[
+              0.6, 0, 0, 0, 20,
+              0, 0.6, 0, 0, 20,
+              0, 0, 0.6, 0, 20,
+              0, 0, 0, 1, 0,
+            ])
+          : const ColorFilter.mode(Colors.transparent, BlendMode.multiply),
+      child: FlutterMap(
+        options: const MapOptions(
+          initialCenter: _udstCampus,
+          initialZoom: 15.5,
+          interactionOptions: InteractionOptions(
+            flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+          ),
+        ),
         children: [
-          // Driver marker
-          Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _PulseMarker(isDark: isDark),
-              ],
-            ),
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.unieats.driver',
+          ),
+          MarkerLayer(
+            markers: [
+              Marker(
+                point: _udstCampus,
+                width: 52,
+                height: 52,
+                child: const _PulseMarker(),
+              ),
+            ],
           ),
         ],
       ),
@@ -28,8 +58,7 @@ class MockMap extends StatelessWidget {
 }
 
 class _PulseMarker extends StatefulWidget {
-  final bool isDark;
-  const _PulseMarker({required this.isDark});
+  const _PulseMarker();
 
   @override
   State<_PulseMarker> createState() => _PulseMarkerState();
@@ -103,80 +132,4 @@ class _PulseMarkerState extends State<_PulseMarker>
       ),
     );
   }
-}
-
-class _MapPainter extends CustomPainter {
-  final bool isDark;
-  _MapPainter({required this.isDark});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final bg = isDark ? const Color(0xFF1A1A1A) : const Color(0xFFE8E8E8);
-    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height),
-        Paint()..color = bg);
-
-    // Grid lines
-    final gridPaint = Paint()
-      ..color = isDark
-          ? Colors.white.withValues(alpha: 0.04)
-          : Colors.black.withValues(alpha: 0.06)
-      ..strokeWidth = 1;
-    const step = 40.0;
-    for (double x = 0; x < size.width; x += step) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
-    }
-    for (double y = 0; y < size.height; y += step) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
-    }
-
-    // Roads
-    final roadPaint = Paint()
-      ..color = isDark ? const Color(0xFF2A2A2A) : const Color(0xFFCCCCCC);
-    final roads = [
-      Rect.fromLTWH(0, size.height * 0.28, size.width, 14),
-      Rect.fromLTWH(0, size.height * 0.54, size.width, 14),
-      Rect.fromLTWH(0, size.height * 0.74, size.width, 14),
-      Rect.fromLTWH(size.width * 0.24, 0, 14, size.height),
-      Rect.fromLTWH(size.width * 0.54, 0, 14, size.height),
-      Rect.fromLTWH(size.width * 0.78, 0, 14, size.height),
-    ];
-    for (final r in roads) {
-      canvas.drawRect(r, roadPaint);
-    }
-
-    // Blocks
-    final blockPaint = Paint()
-      ..color = isDark ? const Color(0xFF252525) : const Color(0xFFD8D8D8);
-    final rrect = const Radius.circular(4);
-    final blocks = [
-      Rect.fromLTWH(size.width * .05, size.height * .08, size.width * .17, size.height * .17),
-      Rect.fromLTWH(size.width * .29, size.height * .08, size.width * .22, size.height * .17),
-      Rect.fromLTWH(size.width * .60, size.height * .08, size.width * .16, size.height * .14),
-      Rect.fromLTWH(size.width * .05, size.height * .36, size.width * .16, size.height * .15),
-      Rect.fromLTWH(size.width * .29, size.height * .36, size.width * .21, size.height * .13),
-      Rect.fromLTWH(size.width * .60, size.height * .36, size.width * .16, size.height * .15),
-      Rect.fromLTWH(size.width * .05, size.height * .60, size.width * .17, size.height * .11),
-      Rect.fromLTWH(size.width * .29, size.height * .60, size.width * .21, size.height * .11),
-      Rect.fromLTWH(size.width * .05, size.height * .79, size.width * .16, size.height * .15),
-      Rect.fromLTWH(size.width * .29, size.height * .79, size.width * .22, size.height * .13),
-      Rect.fromLTWH(size.width * .60, size.height * .79, size.width * .16, size.height * .13),
-    ];
-    for (final b in blocks) {
-      canvas.drawRRect(RRect.fromRectAndRadius(b, rrect), blockPaint);
-    }
-
-    // Park
-    final parkPaint = Paint()
-      ..color = isDark ? const Color(0xFF1A2A1A) : const Color(0xFFC8DCC8);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(size.width * .60, size.height * .60, size.width * .19, size.height * .11),
-        const Radius.circular(6),
-      ),
-      parkPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_MapPainter old) => old.isDark != isDark;
 }

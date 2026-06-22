@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
+import '../../services/firestore_order_service.dart';
 
 class EarningsScreen extends StatefulWidget {
   const EarningsScreen({super.key});
@@ -13,12 +14,22 @@ class EarningsScreen extends StatefulWidget {
 class _EarningsScreenState extends State<EarningsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
+  late Future<List<DeliveredTrip>> _todayTripsFuture;
+  late Future<List<DeliveredTrip>> _weekTripsFuture;
+  late Future<List<DeliveredTrip>> _monthTripsFuture;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 3, vsync: this);
     _tabs.addListener(() => setState(() {}));
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    _todayTripsFuture = FirestoreOrderService.instance.fetchTripHistory(kDriverId, startOfToday);
+    _weekTripsFuture = FirestoreOrderService.instance
+        .fetchTripHistory(kDriverId, startOfToday.subtract(const Duration(days: 7)));
+    _monthTripsFuture = FirestoreOrderService.instance
+        .fetchTripHistory(kDriverId, startOfToday.subtract(const Duration(days: 30)));
   }
 
   @override
@@ -112,23 +123,23 @@ class _EarningsScreenState extends State<EarningsScreen>
                     heroValue: 'QAR ${driver.todayEarnings.toStringAsFixed(2)}',
                     heroSub: '${driver.todayTrips} trips today',
                     barData: const [40, 80, 60, 120, 90, 142, 0],
-                    trips: _todayTrips(),
+                    tripsFuture: _todayTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                   ),
                   _EarningsTab(
-                    heroValue: 'QAR 874.00',
-                    heroSub: '47 trips this week',
+                    heroValue: 'This Week',
+                    heroSub: 'Last 7 days',
                     barData: const [120, 98, 142, 100, 160, 130, 124],
-                    trips: _weekTrips(),
+                    tripsFuture: _weekTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                   ),
                   _EarningsTab(
-                    heroValue: 'QAR 3,241.00',
-                    heroSub: '182 trips this month',
+                    heroValue: 'This Month',
+                    heroSub: 'Last 30 days',
                     barData: const [90, 110, 130, 80, 150, 120, 160],
-                    trips: _weekTrips(),
+                    tripsFuture: _monthTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                   ),
@@ -141,37 +152,13 @@ class _EarningsScreenState extends State<EarningsScreen>
     );
   }
 
-  List<_TripData> _todayTrips() => [
-        _TripData(from: 'Campus Kitchen', to: 'Dorm Block C', amount: 18.50, time: '2:14 PM'),
-        _TripData(from: 'Spice Garden', to: 'Library Plaza', amount: 14.00, time: '1:02 PM'),
-        _TripData(from: 'Café Bliss', to: 'Engineering Block', amount: 22.00, time: '11:45 AM'),
-      ];
-
-  List<_TripData> _weekTrips() => [
-        _TripData(from: 'Campus Kitchen', to: 'Dorm Block A', amount: 16.50, time: 'Mon'),
-        _TripData(from: 'Noodle House', to: 'Admin Block', amount: 19.00, time: 'Tue'),
-        _TripData(from: 'Burger Stop', to: 'Gym', amount: 21.00, time: 'Wed'),
-      ];
-}
-
-class _TripData {
-  final String from;
-  final String to;
-  final double amount;
-  final String time;
-  const _TripData({
-    required this.from,
-    required this.to,
-    required this.amount,
-    required this.time,
-  });
 }
 
 class _EarningsTab extends StatelessWidget {
   final String heroValue;
   final String heroSub;
   final List<int> barData;
-  final List<_TripData> trips;
+  final Future<List<DeliveredTrip>> tripsFuture;
   final bool isDark;
   final Color cardBg;
 
@@ -179,7 +166,7 @@ class _EarningsTab extends StatelessWidget {
     required this.heroValue,
     required this.heroSub,
     required this.barData,
-    required this.trips,
+    required this.tripsFuture,
     required this.isDark,
     required this.cardBg,
   });
@@ -347,7 +334,47 @@ class _EarningsTab extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        ...trips.map((t) => _TripCard(trip: t, isDark: isDark, cardBg: cardBg)),
+        FutureBuilder<List<DeliveredTrip>>(
+          future: tripsFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              );
+            }
+            if (snapshot.hasError) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Text(
+                  'Could not load trip history.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
+                  ),
+                ),
+              );
+            }
+            final trips = snapshot.data ?? const [];
+            if (trips.isEmpty) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Text(
+                  'No completed trips in this period yet.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
+                  ),
+                ),
+              );
+            }
+            return Column(
+              children: trips
+                  .map((t) => _TripCard(trip: t, isDark: isDark, cardBg: cardBg))
+                  .toList(),
+            );
+          },
+        ),
         const SizedBox(height: 24),
       ],
     );
@@ -385,10 +412,18 @@ class _BarChartPainter extends CustomPainter {
 }
 
 class _TripCard extends StatelessWidget {
-  final _TripData trip;
+  final DeliveredTrip trip;
   final bool isDark;
   final Color cardBg;
   const _TripCard({required this.trip, required this.isDark, required this.cardBg});
+
+  String get _timeLabel {
+    final t = trip.deliveredAt;
+    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
+    final m = t.minute.toString().padLeft(2, '0');
+    final period = t.hour < 12 ? 'AM' : 'PM';
+    return '$h:$m $period';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -424,14 +459,14 @@ class _TripCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(trip.from,
+                Text(trip.restaurant,
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
                       color: isDark ? AppColors.darkText : AppColors.lightText,
                     )),
                 const SizedBox(height: 4),
-                Text(trip.to,
+                Text(trip.dropoff,
                     style: TextStyle(
                       fontSize: 12,
                       color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
@@ -451,7 +486,7 @@ class _TripCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 3),
-              Text(trip.time,
+              Text(_timeLabel,
                   style: const TextStyle(
                     fontSize: 11,
                     color: AppColors.darkSubText,

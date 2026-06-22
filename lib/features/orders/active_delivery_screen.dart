@@ -151,13 +151,15 @@ class _CompactHeader extends StatelessWidget {
   // Destination address for navigation — switches at enRoute
   String get _navAddress => switch (order.step) {
         DeliveryStep.toRestaurant || DeliveryStep.atRestaurant => order.restaurantAddr,
-        DeliveryStep.enRoute || DeliveryStep.delivered => order.customerAddr,
+        DeliveryStep.enRoute || DeliveryStep.atCustomer || DeliveryStep.delivered =>
+          order.customerAddr,
       };
 
   String get _stepLabel => switch (order.step) {
         DeliveryStep.toRestaurant => 'Head to restaurant',
         DeliveryStep.atRestaurant => 'Pick up order',
         DeliveryStep.enRoute => 'En route to customer',
+        DeliveryStep.atCustomer => 'Arrived at customer',
         DeliveryStep.delivered => 'Order delivered ✓',
       };
 
@@ -165,13 +167,15 @@ class _CompactHeader extends StatelessWidget {
         DeliveryStep.toRestaurant => AppColors.orange,
         DeliveryStep.atRestaurant => const Color(0xFFFFA940),
         DeliveryStep.enRoute => AppColors.green,
+        DeliveryStep.atCustomer => AppColors.green,
         DeliveryStep.delivered => AppColors.green,
       };
 
   String get _actionLabel => switch (order.step) {
         DeliveryStep.toRestaurant => 'At Restaurant',
         DeliveryStep.atRestaurant => 'Picked Up',
-        DeliveryStep.enRoute => 'Delivered',
+        DeliveryStep.enRoute => 'Arrived',
+        DeliveryStep.atCustomer => 'Delivered',
         DeliveryStep.delivered => 'Done',
       };
 
@@ -343,6 +347,7 @@ class _OrderTabs extends StatelessWidget {
         DeliveryStep.toRestaurant => AppColors.orange,
         DeliveryStep.atRestaurant => const Color(0xFFFFA940),
         DeliveryStep.enRoute => AppColors.green,
+        DeliveryStep.atCustomer => AppColors.green,
         DeliveryStep.delivered => AppColors.green,
       };
 
@@ -523,6 +528,7 @@ class _StepTracker extends StatelessWidget {
       (DeliveryStep.toRestaurant, Icons.directions_bike_outlined, 'To\nRestaurant'),
       (DeliveryStep.atRestaurant, Icons.storefront_outlined, 'Pick Up'),
       (DeliveryStep.enRoute, Icons.navigation_outlined, 'Deliver'),
+      (DeliveryStep.atCustomer, Icons.flag_outlined, 'Arrived'),
     ];
 
     return Row(

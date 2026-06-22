@@ -1,6 +1,9 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../../services/firestore_order_service.dart';
 
-enum DeliveryStep { toRestaurant, atRestaurant, enRoute, delivered }
+enum DeliveryStep { toRestaurant, atRestaurant, enRoute, atCustomer, delivered }
 
 const _kMaxOrders = 3;
 
@@ -167,20 +170,31 @@ class DriverProvider extends ChangeNotifier {
   bool _isOnline = false;
   bool get isOnline => _isOnline;
 
+  // Firestore subscription for available delivery orders
+  StreamSubscription<List<FirestoreOrder>>? _availableOrdersSub;
+  // Firestore order ID for the currently incoming order (null = mock mode)
+  String? _incomingFirestoreOrderId;
+
   bool _hasIncomingOrder = false;
   bool get hasIncomingOrder => _hasIncomingOrder;
 
   _OrderTemplate? _incomingTemplate;
 
-  // Expose individual fields so private _OrderTemplate stays internal
-  String? get incomingRestaurant => _incomingTemplate?.restaurant;
-  String? get incomingStall => _incomingTemplate?.stall;
-  String? get incomingDropoff => _incomingTemplate?.dropoff;
-  double? get incomingPayout => _incomingTemplate?.payout;
-  double? get incomingDistKm => _incomingTemplate?.distKm;
-  int? get incomingEtaMin => _incomingTemplate?.etaMin;
-  int? get incomingItemCount => _incomingTemplate?.items.length;
-  String? get incomingFoodType => _incomingTemplate?.foodType;
+  // Expose individual fields — pulls from Firestore order if available, else mock template
+  String? get incomingRestaurant =>
+      _firestoreIncoming?.restaurant ?? _incomingTemplate?.restaurant;
+  String? get incomingStall =>
+      _incomingTemplate?.stall ?? (_firestoreIncoming != null ? 'Counter' : null);
+  String? get incomingDropoff =>
+      _firestoreIncoming?.deliveryAddress ?? _incomingTemplate?.dropoff;
+  double? get incomingPayout =>
+      _firestoreIncoming?.payout ?? _incomingTemplate?.payout;
+  double? get incomingDistKm => _incomingTemplate?.distKm ?? 1.5;
+  int? get incomingEtaMin => _incomingTemplate?.etaMin ?? 15;
+  int? get incomingItemCount =>
+      _firestoreIncoming?.itemCount ?? _incomingTemplate?.items.length;
+  String? get incomingFoodType =>
+      _incomingTemplate?.foodType ?? (_firestoreIncoming != null ? '🍽 Food' : null);
 
   final List<ActiveOrder> _activeOrders = [];
   List<ActiveOrder> get activeOrders => List.unmodifiable(_activeOrders);
@@ -203,17 +217,45 @@ class DriverProvider extends ChangeNotifier {
 
   int _nextTemplateIndex = 0;
 
-  double _todayEarnings = 142.0;
+  double _todayEarnings = 0;
   double get todayEarnings => _todayEarnings;
 
-  int _todayTrips = 8;
+  int _todayTrips = 0;
   int get todayTrips => _todayTrips;
 
-  double _rating = 4.92;
+  double _rating = 5.0;
   double get rating => _rating;
 
-  int _acceptanceRate = 98;
+  int _acceptanceRate = 100;
   int get acceptanceRate => _acceptanceRate;
+
+  /// Set once after sign-in (see MainNavShell) so the dashboard shows the
+  /// driver's real lifetime rating/acceptance rate instead of a placeholder.
+  void syncFromProfile({required double rating, required int acceptanceRate}) {
+    _rating = rating;
+    _acceptanceRate = acceptanceRate;
+    notifyListeners();
+  }
+
+  /// Replaces the hardcoded launch values with real numbers from today's
+  /// completed deliveries. Call once after sign-in.
+  Future<void> loadTodayStats(String uid) async {
+    if (!kUseFirebase || uid.isEmpty) return;
+    try {
+      final stats = await FirestoreOrderService.instance.fetchTodayStats(uid);
+      _todayEarnings = stats.earnings;
+      _todayTrips = stats.trips;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[DriverProvider] loadTodayStats failed: $e');
+    }
+  }
+
+  // Surfaced by MainNavShell as a SnackBar — cleared right after showing.
+  String? errorMessage;
+  void clearError() {
+    errorMessage = null;
+  }
 
   final List<DriverNotification> _notifications = [
     DriverNotification(
@@ -284,20 +326,86 @@ class DriverProvider extends ChangeNotifier {
         time: DateTime.now(),
       ));
       notifyListeners();
-      // Ping the driver about pending orders shortly after going online
-      Future.delayed(const Duration(seconds: 2), () {
-        if (_isOnline && _activeOrders.length < _kMaxOrders && !_hasIncomingOrder) {
-          triggerNewOrder();
-        }
-      });
+      if (kUseFirebase) {
+        _subscribeToAvailableOrders();
+        FirestoreOrderService.instance
+            .setDriverOnline(true)
+            .catchError((e) => debugPrint('[Firestore] setOnline failed: $e'));
+      } else {
+        // Mock mode: simulate incoming order after short delay
+        Future.delayed(const Duration(seconds: 2), () {
+          if (_isOnline && _activeOrders.length < _kMaxOrders && !_hasIncomingOrder) {
+            triggerNewOrder();
+          }
+        });
+      }
     } else {
+      _availableOrdersSub?.cancel();
+      _availableOrdersSub = null;
+      if (kUseFirebase) {
+        FirestoreOrderService.instance
+            .setDriverOnline(false)
+            .catchError((e) => debugPrint('[Firestore] setOffline failed: $e'));
+      }
       notifyListeners();
     }
   }
 
+  void _subscribeToAvailableOrders() {
+    _availableOrdersSub?.cancel();
+    _availableOrdersSub = FirestoreOrderService.instance
+        .streamAvailableOrders()
+        .listen((orders) {
+      if (!_isOnline || _hasIncomingOrder || _activeOrders.length >= _kMaxOrders) return;
+      if (orders.isEmpty) return;
+      final first = orders.first;
+      _incomingFirestoreOrderId = first.id;
+      _incomingTemplate = null; // clear mock template
+      _hasIncomingOrder = true;
+      addNotification(DriverNotification(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        title: 'New Order — ${first.restaurant}',
+        body: '${first.restaurant} → ${first.deliveryAddress ?? 'Campus'} • QAR ${first.payout.toStringAsFixed(2)}',
+        icon: '🛵',
+        time: DateTime.now(),
+      ));
+      // Expose Firestore order fields for the incoming order screen
+      _firestoreIncoming = first;
+      notifyListeners();
+    }, onError: (Object e) {
+      // Most likely cause: the composite index this query needs is still
+      // building. The stream dies on error and won't come back on its
+      // own once the index finishes — so retry instead of leaving the
+      // driver stuck silently offline-feeling while still "online".
+      debugPrint('[DriverProvider] streamAvailableOrders failed: $e');
+      errorMessage = 'Reconnecting to available orders…';
+      notifyListeners();
+      Future.delayed(const Duration(seconds: 5), () {
+        if (_isOnline) _subscribeToAvailableOrders();
+      });
+    });
+  }
+
+  // Firestore incoming order data (null in mock mode)
+  FirestoreOrder? _firestoreIncoming;
+  FirestoreOrder? get firestoreIncoming => _firestoreIncoming;
+
   void goOffline() {
     _isOnline = false;
+    _availableOrdersSub?.cancel();
+    _availableOrdersSub = null;
+    if (kUseFirebase) {
+      FirestoreOrderService.instance
+          .setDriverOnline(false)
+          .catchError((e) => debugPrint('[Firestore] setOffline failed: $e'));
+    }
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _availableOrdersSub?.cancel();
+    super.dispose();
   }
 
   void triggerNewOrder() {
@@ -315,7 +423,12 @@ class DriverProvider extends ChangeNotifier {
     }
   }
 
-  void acceptOrder() {
+  Future<void> acceptOrder() async {
+    if (kUseFirebase && _incomingFirestoreOrderId != null) {
+      await _acceptFirestoreOrder();
+      return;
+    }
+    // Mock mode
     final template = _incomingTemplate;
     if (template == null) return;
     final order = ActiveOrder.fromTemplate(
@@ -327,8 +440,8 @@ class DriverProvider extends ChangeNotifier {
     _nextTemplateIndex++;
     _hasIncomingOrder = false;
     _incomingTemplate = null;
+    _firestoreIncoming = null;
     notifyListeners();
-    // Ping another order after a delay if there's still capacity
     Future.delayed(const Duration(seconds: 10), () {
       if (_isOnline && _activeOrders.length < _kMaxOrders && !_hasIncomingOrder) {
         triggerNewOrder();
@@ -336,17 +449,103 @@ class DriverProvider extends ChangeNotifier {
     });
   }
 
+  Future<void> _acceptFirestoreOrder() async {
+    final fsOrder = _firestoreIncoming;
+    final fsOrderId = _incomingFirestoreOrderId;
+    if (fsOrder == null || fsOrderId == null) return;
+
+    // Confirm with Firestore FIRST — a transaction, so if another driver
+    // already claimed this order we find out before committing it locally,
+    // instead of showing it as accepted and then silently losing it.
+    try {
+      await FirestoreOrderService.instance.acceptOrder(fsOrderId);
+    } catch (e) {
+      errorMessage = e is OrderAlreadyTakenException
+          ? e.toString()
+          : 'Could not accept this order — check your connection and try again.';
+      _hasIncomingOrder = false;
+      _incomingFirestoreOrderId = null;
+      _firestoreIncoming = null;
+      notifyListeners();
+      return;
+    }
+
+    final order = ActiveOrder._(
+      id: fsOrderId,
+      restaurant: fsOrder.restaurant,
+      restaurantAddr: fsOrder.restaurantAddr,
+      stall: '',
+      dropoff: fsOrder.deliveryAddress ?? 'Campus',
+      customerAddr: fsOrder.deliveryAddress ?? 'Campus',
+      payout: fsOrder.payout,
+      tip: 0,
+      deliveryFee: fsOrder.deliveryFee,
+      subtotal: fsOrder.total - fsOrder.deliveryFee,
+      items: fsOrder.items
+          .map((i) => ('📦', '${i['qty']}× ${i['name']}', 'QAR ${i['price']}'))
+          .toList(),
+      foodType: '🍽 Food',
+      distKm: 1.5,
+      etaMin: 15,
+    );
+
+    _activeOrders.add(order);
+    _selectedOrderId = order.id;
+    _hasIncomingOrder = false;
+    _incomingFirestoreOrderId = null;
+    _firestoreIncoming = null;
+    notifyListeners();
+    _watchForReady(fsOrderId, order.restaurant);
+  }
+
+  /// Claiming an order while it's 'awaitingDriver' starts the kitchen, but
+  /// the driver still has to wait for the food itself — watch for the
+  /// vendor marking it 'ready' and notify the driver instead of leaving
+  /// them to keep checking back manually.
+  void _watchForReady(String orderId, String restaurant) {
+    StreamSubscription<String?>? sub;
+    sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((status) {
+      if (status == 'ready') {
+        addNotification(DriverNotification(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          title: 'Order Ready!',
+          body: '$restaurant has your order ready — head in to pick it up.',
+          icon: '🍽',
+          time: DateTime.now(),
+        ));
+        notifyListeners();
+        sub?.cancel();
+      } else if (status == null || status == 'cancelled' || status == 'delivered') {
+        // Order resolved some other way (cancelled, or somehow already
+        // past this point) — nothing left to watch for.
+        sub?.cancel();
+      }
+    }, onError: (Object e) {
+      debugPrint('[DriverProvider] watchForReady failed: $e');
+      sub?.cancel();
+    });
+  }
+
   void rejectOrder() {
     _hasIncomingOrder = false;
     _incomingTemplate = null;
+    _incomingFirestoreOrderId = null;
+    _firestoreIncoming = null;
     notifyListeners();
   }
 
   void declineWithReason(String reason) {
+    final declinedOrderId = _incomingFirestoreOrderId;
     _hasIncomingOrder = false;
     _incomingTemplate = null;
-    // In production: POST reason to admin API
+    _incomingFirestoreOrderId = null;
+    _firestoreIncoming = null;
     notifyListeners();
+    if (kUseFirebase && declinedOrderId != null) {
+      FirestoreOrderService.instance
+          .recordDecline(declinedOrderId, reason)
+          .catchError((e) => debugPrint('[Firestore] recordDecline failed: $e'));
+    }
   }
 
   void pingCustomer(String orderId) {
@@ -355,20 +554,45 @@ class DriverProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void advanceDeliveryStep(String orderId) {
+  Future<void> advanceDeliveryStep(String orderId) async {
     final idx = _activeOrders.indexWhere((o) => o.id == orderId);
     if (idx == -1) return;
     final order = _activeOrders[idx];
+
+    String? firestoreStatus;
     switch (order.step) {
       case DeliveryStep.toRestaurant:
+        // Arrived at the restaurant — not picked up yet. Written as a
+        // separate flag, NOT the order's `status`, because the driver can
+        // physically get here before the kitchen finishes — overwriting
+        // `status` here would wrongly jump the vendor's dashboard out of
+        // "Preparing"/"Ready" before the food is actually done.
         order.step = DeliveryStep.atRestaurant;
+        if (kUseFirebase) {
+          FirestoreOrderService.instance
+              .markArrivedAtRestaurant(orderId)
+              .catchError((e) => debugPrint('[Firestore] markArrived failed: $e'));
+        }
       case DeliveryStep.atRestaurant:
+        // This is the actual pickup moment — the order leaves the restaurant
+        // and is on the way in the same instant. A previous version of this
+        // wrote a follow-up 'enRoute' status a few seconds later to give
+        // "out for delivery" its own state, but that delayed write could
+        // land AFTER the driver had already reached the customer and tapped
+        // "Arrived" — silently regressing the status back to 'enRoute'.
+        // 'pickedUp' alone now represents this whole leg.
         order.step = DeliveryStep.enRoute;
         order.pingCustomerSent = false;
+        firestoreStatus = 'pickedUp';
       case DeliveryStep.enRoute:
+        // Arrived at the customer — not handed off yet. Distinct from
+        // "delivered" so the user/vendor know the driver is right there.
+        order.step = DeliveryStep.atCustomer;
+        firestoreStatus = 'arrivedAtCustomer';
+      case DeliveryStep.atCustomer:
         order.step = DeliveryStep.delivered;
+        firestoreStatus = 'delivered';
       case DeliveryStep.delivered:
-        // Remove order and credit earnings
         _todayEarnings += order.payout;
         _todayTrips += 1;
         _activeOrders.removeAt(idx);
@@ -380,7 +604,17 @@ class DriverProvider extends ChangeNotifier {
           icon: '✅',
           time: DateTime.now(),
         ));
+        if (kUseFirebase && kDriverId.isNotEmpty) {
+          FirestoreOrderService.instance
+              .recordCompletedDelivery(kDriverId, order.payout)
+              .catchError((e) => debugPrint('[Firestore] recordCompletedDelivery failed: $e'));
+        }
     }
     notifyListeners();
+    if (kUseFirebase && firestoreStatus != null) {
+      FirestoreOrderService.instance
+          .updateDeliveryStatus(orderId, firestoreStatus)
+          .catchError((e) => debugPrint('[Firestore] updateDelivery failed: $e'));
+    }
   }
 }

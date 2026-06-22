@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../core/providers/driver_auth_provider.dart';
 import '../../core/providers/driver_provider.dart';
+import '../../services/firestore_order_service.dart' show kDriverId;
 import '../home/home_screen.dart';
 import '../earnings/earnings_screen.dart';
 import '../history/history_screen.dart';
@@ -39,12 +41,33 @@ class _MainNavShellState extends State<MainNavShell> {
       const HistoryScreen(),
       const ProfileScreen(),
     ];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final driverProvider = context.read<DriverProvider>();
+      final profile = context.read<DriverAuthProvider>().profile;
+      driverProvider.loadTodayStats(kDriverId);
+      if (profile != null) {
+        driverProvider.syncFromProfile(
+          rating: profile.rating,
+          acceptanceRate: profile.acceptanceRate,
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final driver = context.watch<DriverProvider>();
     final systemBottom = MediaQuery.of(context).padding.bottom;
+
+    if (driver.errorMessage != null) {
+      final message = driver.errorMessage!;
+      driver.clearError();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      });
+    }
 
     // When the compact delivery bar is visible, push the new order card up
     // so its Accept/Decline buttons are never hidden underneath it.

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
+import '../../core/providers/driver_auth_provider.dart';
 import '../../core/providers/driver_provider.dart';
 import '../../core/theme/theme_provider.dart';
+import '../auth/login_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -11,6 +13,7 @@ class ProfileScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final driver = context.watch<DriverProvider>();
+    final profile = context.watch<DriverAuthProvider>().profile;
     final themeP = context.watch<ThemeProvider>();
     final bg = isDark ? AppColors.darkBg : AppColors.lightBg;
     final cardBg = isDark ? AppColors.darkSurface : Colors.white;
@@ -79,18 +82,18 @@ class ProfileScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 10),
-                  const Text(
-                    'Furqaan Syed',
-                    style: TextStyle(
+                  Text(
+                    profile?.name ?? 'Driver',
+                    style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w900,
                       color: Colors.white,
                     ),
                   ),
                   const SizedBox(height: 3),
-                  const Text(
-                    'Driver ID: #DRV-4291',
-                    style: TextStyle(fontSize: 12, color: Colors.white60),
+                  Text(
+                    profile != null ? 'Driver ID: ${profile.id.substring(0, profile.id.length.clamp(0, 8))}' : '',
+                    style: const TextStyle(fontSize: 12, color: Colors.white60),
                   ),
                 ],
               ),
@@ -104,7 +107,7 @@ class ProfileScreen extends StatelessWidget {
               children: [
                 _StatCol(value: driver.rating.toStringAsFixed(2), label: 'Rating', icon: '⭐'),
                 _vDivider(isDark),
-                _StatCol(value: '${driver.todayTrips * 22}', label: 'Total Trips', icon: '🛵'),
+                _StatCol(value: '${profile?.totalTripsAllTime ?? driver.todayTrips}', label: 'Total Trips', icon: '🛵'),
                 _vDivider(isDark),
                 _StatCol(value: '${driver.acceptanceRate}%', label: 'Acceptance', icon: '✅'),
               ],
@@ -123,10 +126,10 @@ class ProfileScreen extends StatelessWidget {
             cardBg: cardBg,
             title: 'Personal Info',
             children: [
-              _InfoRow(icon: Icons.person_outline, label: 'Furqaan Syed', isDark: isDark),
-              _InfoRow(icon: Icons.phone_outlined, label: '+974 3344 5566', isDark: isDark),
-              _InfoRow(icon: Icons.email_outlined, label: 'syedfurqaan02@gmail.com', isDark: isDark),
-              _InfoRow(icon: Icons.school_outlined, label: 'Qatar University', isDark: isDark),
+              _InfoRow(icon: Icons.person_outline, label: profile?.name ?? '—', isDark: isDark),
+              _InfoRow(icon: Icons.phone_outlined, label: profile?.phone ?? '—', isDark: isDark),
+              _InfoRow(icon: Icons.email_outlined, label: profile?.email ?? '—', isDark: isDark),
+              _InfoRow(icon: Icons.school_outlined, label: profile?.campus ?? '—', isDark: isDark),
             ],
           ),
           const SizedBox(height: 14),
@@ -214,6 +217,29 @@ class ProfileScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: GestureDetector(
+              onTap: () async {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Log Out?'),
+                    content: const Text('You\'ll need to sign in again to receive orders.'),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Log Out', style: TextStyle(color: AppColors.red)),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed != true || !context.mounted) return;
+                await context.read<DriverAuthProvider>().signOut();
+                if (!context.mounted) return;
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const DriverLoginScreen()),
+                  (route) => false,
+                );
+              },
               child: Container(
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 decoration: BoxDecoration(
