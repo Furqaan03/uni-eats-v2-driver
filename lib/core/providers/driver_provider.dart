@@ -47,7 +47,7 @@ const _kTemplates = [
     stall: 'Stall 3',
     dropoff: 'Dorm Block C · Room 204',
     customerAddr: 'Dorm Block C UDST Qatar',
-    payout: 18.50,
+    payout: kDriverPayoutPerDelivery,
     tip: 5.00,
     deliveryFee: 8.50,
     subtotal: 15.00,
@@ -62,7 +62,7 @@ const _kTemplates = [
     stall: 'Counter 2',
     dropoff: 'Engineering Block A · Lab 101',
     customerAddr: 'Engineering Block A UDST Qatar',
-    payout: 24.00,
+    payout: kDriverPayoutPerDelivery,
     tip: 7.00,
     deliveryFee: 10.00,
     subtotal: 24.00,
@@ -77,7 +77,7 @@ const _kTemplates = [
     stall: 'Window 1',
     dropoff: 'Library · Study Room 3',
     customerAddr: 'Library UDST Qatar',
-    payout: 31.50,
+    payout: kDriverPayoutPerDelivery,
     tip: 6.50,
     deliveryFee: 12.00,
     subtotal: 31.50,
@@ -272,6 +272,11 @@ class DriverProvider extends ChangeNotifier {
     errorMessage = null;
   }
 
+  // Only a generic onboarding welcome — no fabricated payout amounts or
+  // promo claims. This used to also seed a fake "QAR 142.00 sent to your
+  // Qatar National Bank account" payout notification and a fake "Bonus
+  // Zone" promo every single app session, regardless of whether either was
+  // true.
   final List<DriverNotification> _notifications = [
     DriverNotification(
       id: '1',
@@ -280,22 +285,6 @@ class DriverProvider extends ChangeNotifier {
       icon: '🎉',
       time: DateTime.now().subtract(const Duration(minutes: 5)),
       read: false,
-    ),
-    DriverNotification(
-      id: '2',
-      title: 'Payout Processed',
-      body: 'QAR 142.00 has been sent to your Qatar National Bank account.',
-      icon: '💰',
-      time: DateTime.now().subtract(const Duration(hours: 2)),
-      read: true,
-    ),
-    DriverNotification(
-      id: '3',
-      title: 'New Bonus Zone Active',
-      body: 'Earn 2× on deliveries from Campus Kitchen between 12–2 PM.',
-      icon: '⚡',
-      time: DateTime.now().subtract(const Duration(hours: 5)),
-      read: true,
     ),
   ];
 

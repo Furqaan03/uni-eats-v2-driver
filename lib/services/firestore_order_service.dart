@@ -8,6 +8,13 @@ const kUseFirebase = true;
 String kDriverId = '';
 String kDriverName = 'Driver';
 
+/// Flat payout per delivery — confirmed fixed business rule, not derived
+/// from the order's delivery fee or total. Previously this was computed as
+/// `deliveryFee > 0 ? deliveryFee : total * 0.15`, which paid drivers a
+/// variable amount depending on order size instead of the actual agreed
+/// flat rate.
+const kDriverPayoutPerDelivery = 5.0;
+
 /// Thrown by [FirestoreOrderService.acceptOrder] when another driver
 /// (or the vendor pulling the order back) already claimed it first.
 class OrderAlreadyTakenException implements Exception {
@@ -96,7 +103,7 @@ class FirestoreOrder {
   });
 
   int get itemCount => items.fold(0, (sum, i) => sum + ((i['qty'] as int?) ?? 1));
-  double get payout => deliveryFee > 0 ? deliveryFee : total * 0.15;
+  double get payout => kDriverPayoutPerDelivery;
 }
 
 class FirestoreOrderService {
@@ -236,13 +243,7 @@ class FirestoreOrderService {
         .where('deliveredAt', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay))
         .get();
 
-    double earnings = 0;
-    for (final doc in snap.docs) {
-      final d = doc.data();
-      final total = (d['total'] as num?)?.toDouble() ?? 0;
-      final deliveryFee = (d['deliveryFee'] as num?)?.toDouble() ?? 0;
-      earnings += deliveryFee > 0 ? deliveryFee : total * 0.15;
-    }
+    final earnings = snap.docs.length * kDriverPayoutPerDelivery;
     return (earnings: earnings, trips: snap.docs.length);
   }
 
@@ -258,7 +259,6 @@ class FirestoreOrderService {
     final trips = snap.docs.map((doc) {
       final d = doc.data();
       final total = (d['total'] as num?)?.toDouble() ?? 0;
-      final deliveryFee = (d['deliveryFee'] as num?)?.toDouble() ?? 0;
       final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate() ?? DateTime.now();
       final placedAt = (d['createdAt'] as Timestamp?)?.toDate() ?? deliveredAt;
       final items = d['items'] as List<dynamic>? ?? const [];
@@ -267,7 +267,7 @@ class FirestoreOrderService {
         restaurant: d['restaurantName'] as String? ?? 'Restaurant',
         customerName: d['customerName'] as String? ?? 'Customer',
         dropoff: d['deliveryAddress'] as String? ?? 'Campus',
-        amount: deliveryFee > 0 ? deliveryFee : total * 0.15,
+        amount: kDriverPayoutPerDelivery,
         orderTotal: total,
         itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
         isPickup: (d['orderType'] as String?) == 'pickup',

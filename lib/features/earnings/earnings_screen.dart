@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
+import '../../services/firestore_order_service.dart';
 
 class EarningsScreen extends StatefulWidget {
   const EarningsScreen({super.key});
@@ -13,18 +14,36 @@ class EarningsScreen extends StatefulWidget {
 class _EarningsScreenState extends State<EarningsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
+  late Future<List<DeliveredTrip>> _tripsFuture;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 3, vsync: this);
     _tabs.addListener(() => setState(() {}));
+    // One 30-day fetch backs all three tabs' bar charts — the 7-day buckets
+    // (Today/Week) and the 30-day bucket (Month) are just different slices
+    // of the same trip list, computed client-side below.
+    _tripsFuture = FirestoreOrderService.instance
+        .fetchTripHistory(kDriverId, DateTime.now().subtract(const Duration(days: 30)));
   }
 
   @override
   void dispose() {
     _tabs.dispose();
     super.dispose();
+  }
+
+  /// Real daily earnings, bucketed by weekday and summed across however many
+  /// days back the chart looks — replaces the old hardcoded mock arrays.
+  List<int> _bucketByWeekday(List<DeliveredTrip> trips, int daysBack) {
+    final cutoff = DateTime.now().subtract(Duration(days: daysBack));
+    final bucket = List<int>.filled(7, 0);
+    for (final t in trips) {
+      if (t.deliveredAt.isBefore(cutoff)) continue;
+      bucket[t.deliveredAt.weekday - 1] += t.amount.round();
+    }
+    return bucket;
   }
 
   @override
@@ -41,51 +60,66 @@ class _EarningsScreenState extends State<EarningsScreen>
     return Scaffold(
       backgroundColor: bg,
       body: SafeArea(
-        child: Column(
-          children: [
-            // Header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-              child: Row(
-                children: [
-                  Text(
-                    'Earnings',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      color: isDark ? AppColors.darkText : AppColors.lightText,
-                    ),
-                  ),
-                  const Spacer(),
-                  GestureDetector(
-                    onTap: () => _showPayoutInfo(context, isDark),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: accent.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(8),
+        child: FutureBuilder<List<DeliveredTrip>>(
+          future: _tripsFuture,
+          builder: (context, snapshot) {
+            final trips = snapshot.data ?? const [];
+            final weekTrips = trips
+                .where((t) =>
+                    t.deliveredAt.isAfter(DateTime.now().subtract(const Duration(days: 7))))
+                .toList();
+            final weekTotal = weekTrips.fold<double>(0, (s, t) => s + t.amount);
+            final monthTotal = trips.fold<double>(0, (s, t) => s + t.amount);
+
+            return Column(
+              children: [
+                // Header
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Earnings',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                          color: isDark ? AppColors.darkText : AppColors.lightText,
+                        ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'Payout: QAR 142',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: accent,
-                            ),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: () => _showPayoutInfo(context, isDark, weekTotal),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                          const SizedBox(width: 4),
-                          Icon(Icons.info_outline_rounded, size: 13, color: accent),
-                        ],
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                // This week's earnings so far — the amount
+                                // that will go out on the next automatic
+                                // Friday payout. Used to be a hardcoded
+                                // "QAR 142" regardless of actual earnings.
+                                'Payout: QAR ${weekTotal.toStringAsFixed(0)}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: accent,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              Icon(Icons.info_outline_rounded, size: 13, color: accent),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
+                ),
+                const SizedBox(height: 16),
             // Tab bar
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -128,23 +162,23 @@ class _EarningsScreenState extends State<EarningsScreen>
                   _EarningsTab(
                     heroValue: 'QAR ${driver.todayEarnings.toStringAsFixed(2)}',
                     heroSub: '${driver.todayTrips} trips today',
-                    barData: const [40, 80, 60, 120, 90, 142, 0],
+                    barData: _bucketByWeekday(trips, 7),
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
                   ),
                   _EarningsTab(
-                    heroValue: 'This Week',
-                    heroSub: 'Last 7 days',
-                    barData: const [120, 98, 142, 100, 160, 130, 124],
+                    heroValue: 'QAR ${weekTotal.toStringAsFixed(2)}',
+                    heroSub: '${weekTrips.length} trips · Last 7 days',
+                    barData: _bucketByWeekday(trips, 7),
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
                   ),
                   _EarningsTab(
-                    heroValue: 'This Month',
-                    heroSub: 'Last 30 days',
-                    barData: const [90, 110, 130, 80, 150, 120, 160],
+                    heroValue: 'QAR ${monthTotal.toStringAsFixed(2)}',
+                    heroSub: '${trips.length} trips · Last 30 days',
+                    barData: _bucketByWeekday(trips, 30),
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
@@ -152,13 +186,15 @@ class _EarningsScreenState extends State<EarningsScreen>
                 ],
               ),
             ),
-          ],
+              ],
+            );
+          },
         ),
       ),
     );
   }
 
-  void _showPayoutInfo(BuildContext context, bool isDark) {
+  void _showPayoutInfo(BuildContext context, bool isDark, double weekTotal) {
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
@@ -172,8 +208,9 @@ class _EarningsScreenState extends State<EarningsScreen>
           ),
         ),
         content: Text(
-          'Your pending balance is transferred automatically to your registered '
-          'bank account every Friday. No action needed on your end.',
+          'Your pending balance of QAR ${weekTotal.toStringAsFixed(2)} is transferred '
+          'automatically to your registered bank account every Friday. No action needed '
+          'on your end.',
           style: TextStyle(
             fontSize: 13,
             color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
@@ -206,6 +243,18 @@ class _EarningsTab extends StatelessWidget {
     required this.cardBg,
     required this.accent,
   });
+
+  /// The upcoming Friday — replaces a hardcoded "Friday, Jun 20" that never
+  /// changed regardless of the actual date.
+  String get _nextPayoutDateLabel {
+    final now = DateTime.now();
+    final daysUntilFriday = (DateTime.friday - now.weekday + 7) % 7;
+    final next = now.add(Duration(days: daysUntilFriday == 0 ? 7 : daysUntilFriday));
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return 'Friday, ${months[next.month - 1]} ${next.day}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -288,7 +337,7 @@ class _EarningsTab extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Friday, Jun 20',
+                        _nextPayoutDateLabel,
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w800,
@@ -391,7 +440,7 @@ class _EarningsTab extends StatelessWidget {
             const SizedBox(height: 16),
             _BreakdownRow(label: heroSub, value: heroValue, isDark: isDark),
             const Divider(height: 24),
-            _BreakdownRow(label: 'Payout date', value: 'Friday, Jun 20', isDark: isDark),
+            _BreakdownRow(label: 'Payout date', value: _nextPayoutDateLabel, isDark: isDark),
             const SizedBox(height: 10),
             _BreakdownRow(label: 'Method', value: 'Automatic bank transfer', isDark: isDark),
           ],

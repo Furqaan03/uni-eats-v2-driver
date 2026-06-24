@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
+import '../../services/firestore_order_service.dart';
 
 class NewOrderScreen extends StatefulWidget {
   /// True when the card sits at the very bottom of the screen (no active delivery bar below it).
@@ -181,14 +182,27 @@ class _NewOrderScreenState extends State<NewOrderScreen>
     final driver = context.read<DriverProvider>();
     final accent = _isCritical ? AppColors.red : AppColors.yellow;
 
-    final restaurant = driver.incomingRestaurant ?? 'Campus Kitchen';
-    final stall = driver.incomingStall ?? 'Stall 3';
-    final dropoff = driver.incomingDropoff ?? 'Dorm Block C · Room 204';
-    final payout = driver.incomingPayout ?? 18.50;
-    final distKm = driver.incomingDistKm ?? 2.1;
-    final etaMin = driver.incomingEtaMin ?? 12;
-    final itemCount = driver.incomingItemCount ?? 2;
-    final foodType = driver.incomingFoodType ?? '🍕 Italian';
+    // This screen is only ever shown while driver.hasIncomingOrder is true,
+    // which is only ever set alongside a real Firestore order or a mock
+    // template — so incomingRestaurant should never actually be null here.
+    // If it somehow is (an inconsistent-state bug elsewhere), don't fabricate
+    // a fake "Campus Kitchen, QAR 5" order for the driver to act on — bail
+    // out instead.
+    if (driver.incomingRestaurant == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (driver.hasIncomingOrder) driver.rejectOrder();
+      });
+      return const SizedBox.shrink();
+    }
+
+    final restaurant = driver.incomingRestaurant!;
+    final stall = driver.incomingStall ?? 'Counter';
+    final dropoff = driver.incomingDropoff ?? 'Campus';
+    final payout = driver.incomingPayout ?? kDriverPayoutPerDelivery;
+    final distKm = driver.incomingDistKm ?? 1.5;
+    final etaMin = driver.incomingEtaMin ?? 15;
+    final itemCount = driver.incomingItemCount ?? 1;
+    final foodType = driver.incomingFoodType ?? '🍽 Food';
     final etaRestaurant = (etaMin * 0.4).ceil();
 
     return Container(
