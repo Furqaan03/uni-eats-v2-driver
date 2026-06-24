@@ -107,6 +107,12 @@ class ActiveOrder {
   final int etaMin;
   DeliveryStep step;
   bool pingCustomerSent;
+  // True once the vendor marks the kitchen status 'ready'. A driver can
+  // mark arrival at the restaurant before this (informational only — see
+  // ORDER_LIFECYCLE.md), but can't mark the order picked up until the food
+  // actually exists. Mock-mode orders simulate readiness on a timer since
+  // there's no vendor app driving them.
+  bool isReady;
 
   ActiveOrder._({
     required this.id,
@@ -124,7 +130,8 @@ class ActiveOrder {
     required this.distKm,
     required this.etaMin,
   }) : step = DeliveryStep.toRestaurant,
-       pingCustomerSent = false;
+       pingCustomerSent = false,
+       isReady = false;
 
   factory ActiveOrder.fromTemplate(String id, _OrderTemplate t) => ActiveOrder._(
         id: id,
@@ -199,6 +206,14 @@ class DriverProvider extends ChangeNotifier {
   final List<ActiveOrder> _activeOrders = [];
   List<ActiveOrder> get activeOrders => List.unmodifiable(_activeOrders);
   bool get hasActiveDelivery => _activeOrders.isNotEmpty;
+
+  /// A driver mid-delivery must finish (or have the order cancelled) before
+  /// going offline — otherwise a customer's order could be abandoned with
+  /// nobody assigned to complete it.
+  bool get canGoOffline => !hasActiveDelivery;
+  static const String cannotGoOfflineMessage =
+      'You still have an order in progress. Please complete this delivery '
+      'before going offline.';
 
   String? _selectedOrderId;
   ActiveOrder? get selectedOrder {
@@ -316,6 +331,7 @@ class DriverProvider extends ChangeNotifier {
   }
 
   void toggleOnline() {
+    if (_isOnline && !canGoOffline) return;
     _isOnline = !_isOnline;
     if (_isOnline) {
       addNotification(DriverNotification(
@@ -391,6 +407,7 @@ class DriverProvider extends ChangeNotifier {
   FirestoreOrder? get firestoreIncoming => _firestoreIncoming;
 
   void goOffline() {
+    if (!canGoOffline) return;
     _isOnline = false;
     _availableOrdersSub?.cancel();
     _availableOrdersSub = null;
@@ -442,10 +459,30 @@ class DriverProvider extends ChangeNotifier {
     _incomingTemplate = null;
     _firestoreIncoming = null;
     notifyListeners();
+    _simulateKitchenReady(order.id, order.restaurant);
     Future.delayed(const Duration(seconds: 10), () {
       if (_isOnline && _activeOrders.length < _kMaxOrders && !_hasIncomingOrder) {
         triggerNewOrder();
       }
+    });
+  }
+
+  /// Mock-mode stand-in for the vendor app marking the kitchen 'ready' —
+  /// there's no real vendor driving these orders, so simulate the same
+  /// delay instead of leaving pickup permanently unlocked.
+  void _simulateKitchenReady(String orderId, String restaurant) {
+    Future.delayed(const Duration(seconds: 8), () {
+      final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+      if (idx == -1 || _activeOrders[idx].isReady) return;
+      _activeOrders[idx].isReady = true;
+      addNotification(DriverNotification(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        title: 'Order Ready!',
+        body: '$restaurant has your order ready — head in to pick it up.',
+        icon: '🍽',
+        time: DateTime.now(),
+      ));
+      notifyListeners();
     });
   }
 
@@ -505,15 +542,22 @@ class DriverProvider extends ChangeNotifier {
   void _watchForReady(String orderId, String restaurant) {
     StreamSubscription<String?>? sub;
     sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((status) {
-      if (status == 'ready') {
-        addNotification(DriverNotification(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          title: 'Order Ready!',
-          body: '$restaurant has your order ready — head in to pick it up.',
-          icon: '🍽',
-          time: DateTime.now(),
-        ));
-        notifyListeners();
+      // 'assigned' is the vendor's fallback mapping for "ready, driver
+      // matched but not yet there" (see firestore_order_service.dart) — the
+      // kitchen is done either way, so either status string unlocks pickup.
+      if (status == 'ready' || status == 'assigned') {
+        final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+        if (idx != -1 && !_activeOrders[idx].isReady) {
+          _activeOrders[idx].isReady = true;
+          addNotification(DriverNotification(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            title: 'Order Ready!',
+            body: '$restaurant has your order ready — head in to pick it up.',
+            icon: '🍽',
+            time: DateTime.now(),
+          ));
+          notifyListeners();
+        }
         sub?.cancel();
       } else if (status == null || status == 'cancelled' || status == 'delivered') {
         // Order resolved some other way (cancelled, or somehow already
@@ -554,9 +598,17 @@ class DriverProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Guards against any UI surface calling this twice for the same order in
+  // quick succession (e.g. a duplicate control, or a double-tap before the
+  // button's label updates) — without it, a double-call silently skips a
+  // delivery step and desyncs the driver app from what actually happened.
+  final Set<String> _advancingOrderIds = {};
+
   Future<void> advanceDeliveryStep(String orderId) async {
+    if (_advancingOrderIds.contains(orderId)) return;
     final idx = _activeOrders.indexWhere((o) => o.id == orderId);
     if (idx == -1) return;
+    _advancingOrderIds.add(orderId);
     final order = _activeOrders[idx];
 
     String? firestoreStatus;
@@ -574,6 +626,17 @@ class DriverProvider extends ChangeNotifier {
               .catchError((e) => debugPrint('[Firestore] markArrived failed: $e'));
         }
       case DeliveryStep.atRestaurant:
+        // The driver can mark arrival before the kitchen is done (that's
+        // informational only, see the toRestaurant case above) — but they
+        // physically can't pick up food that doesn't exist yet. Block the
+        // actual pickup until the vendor has marked the order ready.
+        if (!order.isReady) {
+          _advancingOrderIds.remove(orderId);
+          errorMessage = "${order.restaurant} hasn't marked this order ready yet — "
+              "wait for it before picking up.";
+          notifyListeners();
+          return;
+        }
         // This is the actual pickup moment — the order leaves the restaurant
         // and is on the way in the same instant. A previous version of this
         // wrote a follow-up 'enRoute' status a few seconds later to give
@@ -616,5 +679,9 @@ class DriverProvider extends ChangeNotifier {
           .updateDeliveryStatus(orderId, firestoreStatus)
           .catchError((e) => debugPrint('[Firestore] updateDelivery failed: $e'));
     }
+    // Released after a short debounce window rather than immediately, so a
+    // human double-tap (two separate gesture events, not a true race) can't
+    // slip through and double-advance the step.
+    Future.delayed(const Duration(milliseconds: 800), () => _advancingOrderIds.remove(orderId));
   }
 }

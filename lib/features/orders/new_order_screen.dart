@@ -95,7 +95,7 @@ class _NewOrderScreenState extends State<NewOrderScreen>
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               border: Border.all(
-                                color: selected == r ? AppColors.orange : AppColors.darkBorder,
+                                color: selected == r ? AppColors.yellow : AppColors.darkBorder,
                                 width: selected == r ? 6 : 2,
                               ),
                             ),
@@ -136,7 +136,7 @@ class _NewOrderScreenState extends State<NewOrderScreen>
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: AppColors.orange),
+                          borderSide: const BorderSide(color: AppColors.yellow),
                         ),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       ),
@@ -179,7 +179,7 @@ class _NewOrderScreenState extends State<NewOrderScreen>
   @override
   Widget build(BuildContext context) {
     final driver = context.read<DriverProvider>();
-    final accent = _isCritical ? AppColors.red : AppColors.orange;
+    final accent = _isCritical ? AppColors.red : AppColors.yellow;
 
     final restaurant = driver.incomingRestaurant ?? 'Campus Kitchen';
     final stall = driver.incomingStall ?? 'Stall 3';
@@ -381,7 +381,6 @@ class _CompactCountdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = isCritical ? AppColors.red : AppColors.orange;
     return CustomPaint(
       painter: _RingPainter(progress: progress, isCritical: isCritical),
       child: SizedBox(
@@ -393,10 +392,10 @@ class _CompactCountdown extends StatelessWidget {
             children: [
               Text(
                 '$remaining',
-                style: TextStyle(
+                style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
-                  color: color,
+                  color: AppColors.darkText,
                 ),
               ),
               Text('sec', style: TextStyle(fontSize: 8, color: AppColors.darkSubText)),
@@ -431,7 +430,7 @@ class _RingPainter extends CustomPainter {
       2 * pi * (1 - progress),
       false,
       Paint()
-        ..color = isCritical ? AppColors.red : AppColors.orange
+        ..color = isCritical ? AppColors.red : AppColors.yellow
         ..style = PaintingStyle.stroke
         ..strokeWidth = 5
         ..strokeCap = StrokeCap.round,
@@ -469,7 +468,7 @@ class _RouteCard extends StatelessWidget {
       child: Column(
         children: [
           _RouteRow(
-            dot: AppColors.orange,
+            dot: AppColors.yellow,
             label: 'PICKUP',
             place: '$restaurant • $stall',
             sub: '~${etaRestaurantMin} min',

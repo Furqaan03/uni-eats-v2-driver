@@ -306,7 +306,15 @@ class _OnlineBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: driver.toggleOnline,
+      onTap: () {
+        if (driver.isOnline && !driver.canGoOffline) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(DriverProvider.cannotGoOfflineMessage)),
+          );
+          return;
+        }
+        driver.toggleOnline();
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         padding: const EdgeInsets.all(16),

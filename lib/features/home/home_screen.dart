@@ -141,6 +141,26 @@ void _showNotifications(BuildContext context, DriverProvider driver, bool isDark
 }
 
 Future<void> _confirmGoOffline(BuildContext context, DriverProvider driver) async {
+  if (!driver.canGoOffline) {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delivery in Progress',
+            style: TextStyle(fontWeight: FontWeight.w800)),
+        content: Text(
+          DriverProvider.cannotGoOfflineMessage,
+          style: const TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Got It', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+    return;
+  }
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (_) => AlertDialog(

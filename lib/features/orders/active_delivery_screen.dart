@@ -157,15 +157,16 @@ class _CompactHeader extends StatelessWidget {
 
   String get _stepLabel => switch (order.step) {
         DeliveryStep.toRestaurant => 'Head to restaurant',
-        DeliveryStep.atRestaurant => 'Pick up order',
+        DeliveryStep.atRestaurant => order.isReady ? 'Pick up order' : 'Waiting on kitchen…',
         DeliveryStep.enRoute => 'En route to customer',
         DeliveryStep.atCustomer => 'Arrived at customer',
         DeliveryStep.delivered => 'Order delivered ✓',
       };
 
   Color get _stepColor => switch (order.step) {
-        DeliveryStep.toRestaurant => AppColors.orange,
-        DeliveryStep.atRestaurant => const Color(0xFFFFA940),
+        DeliveryStep.toRestaurant => AppColors.yellow,
+        DeliveryStep.atRestaurant =>
+          order.isReady ? const Color(0xFFFFA940) : AppColors.darkSubText,
         DeliveryStep.enRoute => AppColors.green,
         DeliveryStep.atCustomer => AppColors.green,
         DeliveryStep.delivered => AppColors.green,
@@ -173,58 +174,62 @@ class _CompactHeader extends StatelessWidget {
 
   String get _actionLabel => switch (order.step) {
         DeliveryStep.toRestaurant => 'At Restaurant',
-        DeliveryStep.atRestaurant => 'Picked Up',
+        DeliveryStep.atRestaurant => order.isReady ? 'Picked Up' : 'Not Ready',
         DeliveryStep.enRoute => 'Arrived',
         DeliveryStep.atCustomer => 'Delivered',
         DeliveryStep.delivered => 'Done',
       };
 
+  bool get _actionEnabled =>
+      order.step != DeliveryStep.atRestaurant || order.isReady;
+
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
-      child: Row(
-        children: [
-          // Step dot
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _stepColor,
-              boxShadow: [
-                BoxShadow(color: _stepColor.withValues(alpha: 0.5), blurRadius: 6),
-              ],
+    return GestureDetector(
+      onTap: onToggle,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+        child: Row(
+          children: [
+            // Step dot
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _stepColor,
+                boxShadow: [
+                  BoxShadow(color: _stepColor.withValues(alpha: 0.5), blurRadius: 6),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
+            const SizedBox(width: 10),
 
-          // Restaurant + step
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  order.restaurant,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.darkText,
+            // Restaurant + step
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    order.restaurant,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.darkText,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  _stepLabel,
-                  style: TextStyle(fontSize: 11, color: _stepColor, fontWeight: FontWeight.w600),
-                ),
-              ],
+                  Text(
+                    _stepLabel,
+                    style: TextStyle(fontSize: 11, color: _stepColor, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
             ),
-          ),
 
-          // Chevron toggle
-          GestureDetector(
-            onTap: onToggle,
-            child: Padding(
+            // Chevron toggle
+            Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: RotationTransition(
                 turns: Tween(begin: 0.0, end: 0.5).animate(
@@ -234,53 +239,65 @@ class _CompactHeader extends StatelessWidget {
                     color: AppColors.darkSubText, size: 22),
               ),
             ),
-          ),
 
-          // Navigate button
-          GestureDetector(
-            onTap: () => _openMaps(_navAddress),
-            child: Container(
-              width: 38,
-              height: 38,
-              margin: const EdgeInsets.only(right: 8),
-              decoration: BoxDecoration(
-                color: AppColors.darkCard,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.darkBorder),
-              ),
-              child: const Icon(Icons.navigation_rounded, color: AppColors.green, size: 18),
-            ),
-          ),
-
-          // Primary action button
-          GestureDetector(
-            onTap: () => driver.advanceDeliveryStep(order.id),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [AppColors.orangeLight, AppColors.orangeDark],
-                ),
-                borderRadius: BorderRadius.circular(12),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppColors.orange.withValues(alpha: 0.3),
-                    blurRadius: 8,
-                    offset: const Offset(0, 3),
+            // Quick action — only shown while collapsed. Once expanded, the
+            // full-width button at the bottom of the detail is the only
+            // control that advances the step; showing both at once let a
+            // driver double-tap and silently skip a step (e.g. jump straight
+            // from "At Restaurant" to "Picked Up" without actually picking
+            // up), which desynced the app from what really happened.
+            if (!expanded)
+              GestureDetector(
+                onTap: _actionEnabled ? () => driver.advanceDeliveryStep(order.id) : null,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    gradient: _actionEnabled
+                        ? const LinearGradient(
+                            colors: [AppColors.orangeLight, AppColors.orangeDark],
+                          )
+                        : null,
+                    color: _actionEnabled ? null : AppColors.darkCard,
+                    borderRadius: BorderRadius.circular(12),
+                    border: _actionEnabled ? null : Border.all(color: AppColors.darkBorder),
+                    boxShadow: _actionEnabled
+                        ? [
+                            BoxShadow(
+                              color: AppColors.orange.withValues(alpha: 0.3),
+                              blurRadius: 8,
+                              offset: const Offset(0, 3),
+                            ),
+                          ]
+                        : null,
                   ),
-                ],
-              ),
-              child: Text(
-                _actionLabel,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.darkText,
+                  child: Text(
+                    _actionLabel,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: _actionEnabled ? AppColors.darkText : AppColors.darkSubText,
+                    ),
+                  ),
                 ),
               ),
+
+            // Navigate button — enlarged, pinned to the trailing corner
+            GestureDetector(
+              onTap: () => _openMaps(_navAddress),
+              child: Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: AppColors.darkCard,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.darkBorder),
+                ),
+                child: const Icon(Icons.navigation_rounded, color: AppColors.green, size: 24),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -324,7 +341,64 @@ class _ExpandedDetail extends StatelessWidget {
             _PingButton(onTap: () => driver.pingCustomer(order.id)),
           if (order.step == DeliveryStep.enRoute && order.pingCustomerSent)
             _PingSentBadge(),
+          const SizedBox(height: 10),
+
+          // Primary action — advances to the next delivery step
+          _PrimaryActionButton(order: order, driver: driver),
         ],
+      ),
+    );
+  }
+}
+
+class _PrimaryActionButton extends StatelessWidget {
+  final ActiveOrder order;
+  final DriverProvider driver;
+  const _PrimaryActionButton({required this.order, required this.driver});
+
+  String get _label => switch (order.step) {
+        DeliveryStep.toRestaurant => 'At Restaurant',
+        DeliveryStep.atRestaurant => order.isReady ? 'Picked Up' : 'Waiting on Kitchen…',
+        DeliveryStep.enRoute => 'Arrived',
+        DeliveryStep.atCustomer => 'Delivered',
+        DeliveryStep.delivered => 'Done',
+      };
+
+  bool get _enabled => order.step != DeliveryStep.atRestaurant || order.isReady;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _enabled ? () => driver.advanceDeliveryStep(order.id) : null,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: _enabled
+              ? const LinearGradient(colors: [AppColors.orangeLight, AppColors.orangeDark])
+              : null,
+          color: _enabled ? null : AppColors.darkCard,
+          borderRadius: BorderRadius.circular(14),
+          border: _enabled ? null : Border.all(color: AppColors.darkBorder),
+          boxShadow: _enabled
+              ? [
+                  BoxShadow(
+                    color: AppColors.orange.withValues(alpha: 0.3),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          _label,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w800,
+            color: _enabled ? AppColors.darkText : AppColors.darkSubText,
+          ),
+        ),
       ),
     );
   }
@@ -344,7 +418,7 @@ class _OrderTabs extends StatelessWidget {
   });
 
   Color _stepColor(DeliveryStep step) => switch (step) {
-        DeliveryStep.toRestaurant => AppColors.orange,
+        DeliveryStep.toRestaurant => AppColors.yellow,
         DeliveryStep.atRestaurant => const Color(0xFFFFA940),
         DeliveryStep.enRoute => AppColors.green,
         DeliveryStep.atCustomer => AppColors.green,
@@ -537,7 +611,7 @@ class _StepTracker extends StatelessWidget {
         final (stepEnum, icon, label) = entry.value;
         final isDone = step.index > stepEnum.index;
         final isCurrent = step == stepEnum;
-        final color = isDone || isCurrent ? AppColors.orange : AppColors.darkBorder;
+        final color = isDone ? AppColors.green : isCurrent ? AppColors.yellow : AppColors.darkSubText;
 
         return Expanded(
           child: Row(
@@ -554,7 +628,7 @@ class _StepTracker extends StatelessWidget {
                         color: isDone
                             ? AppColors.green
                             : isCurrent
-                                ? AppColors.orange.withValues(alpha: 0.15)
+                                ? AppColors.yellow.withValues(alpha: 0.15)
                                 : AppColors.darkCard,
                         border: Border.all(
                           color: isDone ? AppColors.green : color,
@@ -574,7 +648,7 @@ class _StepTracker extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 9,
                         fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
-                        color: isCurrent ? AppColors.orange : AppColors.darkSubText,
+                        color: isCurrent ? AppColors.yellow : AppColors.darkSubText,
                         height: 1.3,
                       ),
                     ),
@@ -615,7 +689,7 @@ class _RouteCard extends StatelessWidget {
       child: Column(
         children: [
           _RouteRow(
-            dot: AppColors.orange,
+            dot: AppColors.yellow,
             label: 'PICKUP',
             place: '${order.restaurant} · ${order.stall}',
             sub: order.restaurantAddr,

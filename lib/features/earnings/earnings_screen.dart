@@ -44,6 +44,10 @@ class _EarningsScreenState extends State<EarningsScreen>
     final driver = context.watch<DriverProvider>();
     final bg = isDark ? AppColors.darkBg : AppColors.lightBg;
     final cardBg = isDark ? AppColors.darkSurface : Colors.white;
+    // AppColors.orange is a near-black brand color — reads fine as a dark
+    // accent on light backgrounds, but is nearly invisible against dark
+    // surfaces. Swap to a genuinely visible accent in dark mode only.
+    final accent = isDark ? AppColors.yellow : AppColors.orange;
 
     return Scaffold(
       backgroundColor: bg,
@@ -64,18 +68,28 @@ class _EarningsScreenState extends State<EarningsScreen>
                     ),
                   ),
                   const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: AppColors.orange.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Text(
-                      'Payout: QAR 142',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.orange,
+                  GestureDetector(
+                    onTap: () => _showPayoutInfo(context, isDark),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Payout: QAR 142',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: accent,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(Icons.info_outline_rounded, size: 13, color: accent),
+                        ],
                       ),
                     ),
                   ),
@@ -95,7 +109,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                 child: TabBar(
                   controller: _tabs,
                   indicator: BoxDecoration(
-                    color: AppColors.orange,
+                    color: accent,
                     borderRadius: BorderRadius.circular(9),
                   ),
                   dividerColor: Colors.transparent,
@@ -103,7 +117,9 @@ class _EarningsScreenState extends State<EarningsScreen>
                     fontSize: 13,
                     fontWeight: FontWeight.w800,
                   ),
-                  labelColor: Colors.white,
+                  // Dark mode's accent is bright yellow — dark text reads
+                  // better on it than white does.
+                  labelColor: isDark ? AppColors.darkBg : Colors.white,
                   unselectedLabelColor:
                       isDark ? AppColors.darkSubText : AppColors.lightSubText,
                   tabs: const [
@@ -126,6 +142,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                     tripsFuture: _todayTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
+                    accent: accent,
                   ),
                   _EarningsTab(
                     heroValue: 'This Week',
@@ -134,6 +151,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                     tripsFuture: _weekTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
+                    accent: accent,
                   ),
                   _EarningsTab(
                     heroValue: 'This Month',
@@ -142,6 +160,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                     tripsFuture: _monthTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
+                    accent: accent,
                   ),
                 ],
               ),
@@ -152,6 +171,36 @@ class _EarningsScreenState extends State<EarningsScreen>
     );
   }
 
+  void _showPayoutInfo(BuildContext context, bool isDark) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: isDark ? AppColors.darkSurface : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Text(
+          'How Payouts Work',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            color: isDark ? AppColors.darkText : AppColors.lightText,
+          ),
+        ),
+        content: Text(
+          'Your pending balance is transferred automatically to your registered '
+          'bank account every Friday. No action needed on your end.',
+          style: TextStyle(
+            fontSize: 13,
+            color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Got It', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _EarningsTab extends StatelessWidget {
@@ -161,6 +210,7 @@ class _EarningsTab extends StatelessWidget {
   final Future<List<DeliveredTrip>> tripsFuture;
   final bool isDark;
   final Color cardBg;
+  final Color accent;
 
   const _EarningsTab({
     required this.heroValue,
@@ -169,6 +219,7 @@ class _EarningsTab extends StatelessWidget {
     required this.tripsFuture,
     required this.isDark,
     required this.cardBg,
+    required this.accent,
   });
 
   @override
@@ -224,62 +275,68 @@ class _EarningsTab extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         // Payout card
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: cardBg,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-          ),
-          child: Row(
-            children: [
-              const Text('🏦', style: TextStyle(fontSize: 26)),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Next Payout',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Friday, Jun 20',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w800,
-                        color: isDark ? AppColors.darkText : AppColors.lightText,
-                      ),
-                    ),
-                  ],
-                ),
+        GestureDetector(
+          onTap: () => _showPayoutBreakdown(context),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                decoration: BoxDecoration(
-                  color: AppColors.green.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Text(
-                  'Automatic',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.green,
+            ),
+            child: Row(
+              children: [
+                const Text('🏦', style: TextStyle(fontSize: 26)),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Next Payout',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Friday, Jun 20',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: isDark ? AppColors.darkText : AppColors.lightText,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
-            ],
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: AppColors.green.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'Automatic',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.green,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right_rounded,
+                    size: 18, color: isDark ? AppColors.darkSubText : AppColors.lightSubText),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 20),
-        // Bar chart
+        // Bar chart — tap a bar to see that day's exact earnings
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -301,10 +358,7 @@ class _EarningsTab extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              CustomPaint(
-                painter: _BarChartPainter(data: barData, isDark: isDark),
-                child: const SizedBox(height: 100, width: double.infinity),
-              ),
+              _InteractiveBarChart(data: barData, isDark: isDark, accent: accent),
               const SizedBox(height: 8),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -370,7 +424,7 @@ class _EarningsTab extends StatelessWidget {
             }
             return Column(
               children: trips
-                  .map((t) => _TripCard(trip: t, isDark: isDark, cardBg: cardBg))
+                  .map((t) => _TripCard(trip: t, isDark: isDark, cardBg: cardBg, accent: accent))
                   .toList(),
             );
           },
@@ -379,43 +433,179 @@ class _EarningsTab extends StatelessWidget {
       ],
     );
   }
+
+  void _showPayoutBreakdown(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: isDark ? AppColors.darkSurface : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Payout Breakdown',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+                color: isDark ? AppColors.darkText : AppColors.lightText,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _BreakdownRow(label: heroSub, value: heroValue, isDark: isDark),
+            const Divider(height: 24),
+            _BreakdownRow(label: 'Payout date', value: 'Friday, Jun 20', isDark: isDark),
+            const SizedBox(height: 10),
+            _BreakdownRow(label: 'Method', value: 'Automatic bank transfer', isDark: isDark),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BreakdownRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool isDark;
+  const _BreakdownRow({required this.label, required this.value, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
+          ),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w800,
+            color: isDark ? AppColors.darkText : AppColors.lightText,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InteractiveBarChart extends StatefulWidget {
+  final List<int> data;
+  final bool isDark;
+  final Color accent;
+  const _InteractiveBarChart({required this.data, required this.isDark, required this.accent});
+
+  @override
+  State<_InteractiveBarChart> createState() => _InteractiveBarChartState();
+}
+
+class _InteractiveBarChartState extends State<_InteractiveBarChart> {
+  static const _days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  int? _selected;
+
+  void _selectFromDx(double dx, double width) {
+    if (width <= 0) return;
+    final gap = width / widget.data.length;
+    final index = (dx / gap).floor().clamp(0, widget.data.length - 1);
+    setState(() => _selected = _selected == index ? null : index);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          child: _selected == null
+              ? const SizedBox(height: 0, width: double.infinity)
+              : Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: widget.accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${_days[_selected ?? 0]} · QAR ${widget.data[_selected ?? 0]}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: widget.accent,
+                      ),
+                    ),
+                  ),
+                ),
+        ),
+        LayoutBuilder(
+          builder: (context, constraints) => GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) => _selectFromDx(d.localPosition.dx, constraints.maxWidth),
+            child: CustomPaint(
+              painter: _BarChartPainter(data: widget.data, accent: widget.accent),
+              child: const SizedBox(height: 100, width: double.infinity),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _BarChartPainter extends CustomPainter {
   final List<int> data;
-  final bool isDark;
-  _BarChartPainter({required this.data, required this.isDark});
+  final Color accent;
+  _BarChartPainter({required this.data, required this.accent});
 
   @override
   void paint(Canvas canvas, Size size) {
     final max = data.reduce((a, b) => a > b ? a : b).toDouble();
     final barW = size.width / (data.length * 1.6);
     final gap = size.width / data.length;
-    final paint = Paint()..style = PaintingStyle.fill;
+    final fill = Paint()
+      ..style = PaintingStyle.fill
+      ..color = accent;
 
+    // Every bar gets the full accent color — the tapped bar's value already
+    // surfaces in the label above, so the bars themselves don't need to dim
+    // each other out.
     for (var i = 0; i < data.length; i++) {
       final h = (data[i] / max) * size.height;
       final x = i * gap + (gap - barW) / 2;
-      final today = i == data.length - 2;
-
-      paint.color = today ? AppColors.orange : AppColors.orange.withValues(alpha: 0.3);
       final rrect = RRect.fromRectAndRadius(
         Rect.fromLTWH(x, size.height - h, barW, h),
         const Radius.circular(4),
       );
-      canvas.drawRRect(rrect, paint);
+      canvas.drawRRect(rrect, fill);
     }
   }
 
   @override
-  bool shouldRepaint(_BarChartPainter old) => old.data != data;
+  bool shouldRepaint(_BarChartPainter old) => old.data != data || old.accent != accent;
 }
 
 class _TripCard extends StatelessWidget {
   final DeliveredTrip trip;
   final bool isDark;
   final Color cardBg;
-  const _TripCard({required this.trip, required this.isDark, required this.cardBg});
+  final Color accent;
+  const _TripCard({
+    required this.trip,
+    required this.isDark,
+    required this.cardBg,
+    required this.accent,
+  });
 
   String get _timeLabel {
     final t = trip.deliveredAt;
@@ -425,75 +615,137 @@ class _TripCard extends StatelessWidget {
     return '$h:$m $period';
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-        ),
+  String get _dateLabel {
+    final t = trip.deliveredAt;
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${months[t.month - 1]} ${t.day}';
+  }
+
+  void _showDetail(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: isDark ? AppColors.darkSurface : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      child: Row(
-        children: [
-          Column(
-            children: [
-              Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                      shape: BoxShape.circle, color: AppColors.orange)),
-              Container(width: 1, height: 18, color: AppColors.darkBorder),
-              Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                      shape: BoxShape.circle, color: AppColors.green)),
-            ],
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(trip.restaurant,
+                Text(
+                  trip.restaurant,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    color: isDark ? AppColors.darkText : AppColors.lightText,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.green.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'Delivered',
                     style: TextStyle(
-                      fontSize: 13,
+                      fontSize: 11,
                       fontWeight: FontWeight.w700,
-                      color: isDark ? AppColors.darkText : AppColors.lightText,
-                    )),
-                const SizedBox(height: 4),
-                Text(trip.dropoff,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-                    )),
+                      color: AppColors.green,
+                    ),
+                  ),
+                ),
               ],
             ),
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                'QAR ${trip.amount.toStringAsFixed(2)}',
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.green,
-                ),
+            const SizedBox(height: 18),
+            _BreakdownRow(label: 'Dropoff', value: trip.dropoff, isDark: isDark),
+            const SizedBox(height: 10),
+            _BreakdownRow(label: 'Delivered on', value: '$_dateLabel · $_timeLabel', isDark: isDark),
+            const Divider(height: 24),
+            _BreakdownRow(
+              label: 'Trip earnings',
+              value: 'QAR ${trip.amount.toStringAsFixed(2)}',
+              isDark: isDark,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dividerColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
+    final subTextColor = isDark ? AppColors.darkSubText : AppColors.lightSubText;
+    return GestureDetector(
+      onTap: () => _showDetail(context),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: dividerColor),
+        ),
+        child: Row(
+          children: [
+            Column(
+              children: [
+                Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: accent)),
+                Container(width: 1, height: 18, color: dividerColor),
+                Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                        shape: BoxShape.circle, color: AppColors.green)),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(trip.restaurant,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: isDark ? AppColors.darkText : AppColors.lightText,
+                      )),
+                  const SizedBox(height: 4),
+                  Text(trip.dropoff,
+                      style: TextStyle(fontSize: 12, color: subTextColor)),
+                ],
               ),
-              const SizedBox(height: 3),
-              Text(_timeLabel,
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  'QAR ${trip.amount.toStringAsFixed(2)}',
                   style: const TextStyle(
-                    fontSize: 11,
-                    color: AppColors.darkSubText,
-                  )),
-            ],
-          ),
-        ],
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.green,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(_timeLabel, style: TextStyle(fontSize: 11, color: subTextColor)),
+              ],
+            ),
+            const SizedBox(width: 4),
+            Icon(Icons.chevron_right_rounded, size: 16, color: subTextColor),
+          ],
+        ),
       ),
     );
   }
