@@ -17,17 +17,31 @@ class OrderAlreadyTakenException implements Exception {
 
 /// One real completed delivery, for the Earnings screen's trip history.
 class DeliveredTrip {
+  final String orderNumber;
   final String restaurant;
+  final String customerName;
   final String dropoff;
   final double amount;
+  final double orderTotal;
+  final int itemCount;
+  final bool isPickup;
+  final DateTime placedAt;
   final DateTime deliveredAt;
 
   const DeliveredTrip({
+    required this.orderNumber,
     required this.restaurant,
+    required this.customerName,
     required this.dropoff,
     required this.amount,
+    required this.orderTotal,
+    required this.itemCount,
+    required this.isPickup,
+    required this.placedAt,
     required this.deliveredAt,
   });
+
+  Duration get tripDuration => deliveredAt.difference(placedAt);
 }
 
 /// A driver's Firestore profile.
@@ -246,10 +260,18 @@ class FirestoreOrderService {
       final total = (d['total'] as num?)?.toDouble() ?? 0;
       final deliveryFee = (d['deliveryFee'] as num?)?.toDouble() ?? 0;
       final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate() ?? DateTime.now();
+      final placedAt = (d['createdAt'] as Timestamp?)?.toDate() ?? deliveredAt;
+      final items = d['items'] as List<dynamic>? ?? const [];
       return DeliveredTrip(
+        orderNumber: d['orderNumber'] as String? ?? '#${doc.id}',
         restaurant: d['restaurantName'] as String? ?? 'Restaurant',
+        customerName: d['customerName'] as String? ?? 'Customer',
         dropoff: d['deliveryAddress'] as String? ?? 'Campus',
         amount: deliveryFee > 0 ? deliveryFee : total * 0.15,
+        orderTotal: total,
+        itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
+        isPickup: (d['orderType'] as String?) == 'pickup',
+        placedAt: placedAt,
         deliveredAt: deliveredAt,
       );
     }).toList()

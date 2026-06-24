@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
-import '../../services/firestore_order_service.dart';
 
 class EarningsScreen extends StatefulWidget {
   const EarningsScreen({super.key});
@@ -14,22 +13,12 @@ class EarningsScreen extends StatefulWidget {
 class _EarningsScreenState extends State<EarningsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
-  late Future<List<DeliveredTrip>> _todayTripsFuture;
-  late Future<List<DeliveredTrip>> _weekTripsFuture;
-  late Future<List<DeliveredTrip>> _monthTripsFuture;
 
   @override
   void initState() {
     super.initState();
     _tabs = TabController(length: 3, vsync: this);
     _tabs.addListener(() => setState(() {}));
-    final now = DateTime.now();
-    final startOfToday = DateTime(now.year, now.month, now.day);
-    _todayTripsFuture = FirestoreOrderService.instance.fetchTripHistory(kDriverId, startOfToday);
-    _weekTripsFuture = FirestoreOrderService.instance
-        .fetchTripHistory(kDriverId, startOfToday.subtract(const Duration(days: 7)));
-    _monthTripsFuture = FirestoreOrderService.instance
-        .fetchTripHistory(kDriverId, startOfToday.subtract(const Duration(days: 30)));
   }
 
   @override
@@ -108,6 +97,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                 ),
                 child: TabBar(
                   controller: _tabs,
+                  indicatorSize: TabBarIndicatorSize.tab,
                   indicator: BoxDecoration(
                     color: accent,
                     borderRadius: BorderRadius.circular(9),
@@ -139,7 +129,6 @@ class _EarningsScreenState extends State<EarningsScreen>
                     heroValue: 'QAR ${driver.todayEarnings.toStringAsFixed(2)}',
                     heroSub: '${driver.todayTrips} trips today',
                     barData: const [40, 80, 60, 120, 90, 142, 0],
-                    tripsFuture: _todayTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
@@ -148,7 +137,6 @@ class _EarningsScreenState extends State<EarningsScreen>
                     heroValue: 'This Week',
                     heroSub: 'Last 7 days',
                     barData: const [120, 98, 142, 100, 160, 130, 124],
-                    tripsFuture: _weekTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
@@ -157,7 +145,6 @@ class _EarningsScreenState extends State<EarningsScreen>
                     heroValue: 'This Month',
                     heroSub: 'Last 30 days',
                     barData: const [90, 110, 130, 80, 150, 120, 160],
-                    tripsFuture: _monthTripsFuture,
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
@@ -207,7 +194,6 @@ class _EarningsTab extends StatelessWidget {
   final String heroValue;
   final String heroSub;
   final List<int> barData;
-  final Future<List<DeliveredTrip>> tripsFuture;
   final bool isDark;
   final Color cardBg;
   final Color accent;
@@ -216,7 +202,6 @@ class _EarningsTab extends StatelessWidget {
     required this.heroValue,
     required this.heroSub,
     required this.barData,
-    required this.tripsFuture,
     required this.isDark,
     required this.cardBg,
     required this.accent,
@@ -376,58 +361,6 @@ class _EarningsTab extends StatelessWidget {
               ),
             ],
           ),
-        ),
-        const SizedBox(height: 20),
-        // Trip list
-        Text(
-          'Trip History',
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w900,
-            color: isDark ? AppColors.darkText : AppColors.lightText,
-          ),
-        ),
-        const SizedBox(height: 12),
-        FutureBuilder<List<DeliveredTrip>>(
-          future: tripsFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              );
-            }
-            if (snapshot.hasError) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                child: Text(
-                  'Could not load trip history.',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-                  ),
-                ),
-              );
-            }
-            final trips = snapshot.data ?? const [];
-            if (trips.isEmpty) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                child: Text(
-                  'No completed trips in this period yet.',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-                  ),
-                ),
-              );
-            }
-            return Column(
-              children: trips
-                  .map((t) => _TripCard(trip: t, isDark: isDark, cardBg: cardBg, accent: accent))
-                  .toList(),
-            );
-          },
         ),
         const SizedBox(height: 24),
       ],
@@ -595,158 +528,3 @@ class _BarChartPainter extends CustomPainter {
   bool shouldRepaint(_BarChartPainter old) => old.data != data || old.accent != accent;
 }
 
-class _TripCard extends StatelessWidget {
-  final DeliveredTrip trip;
-  final bool isDark;
-  final Color cardBg;
-  final Color accent;
-  const _TripCard({
-    required this.trip,
-    required this.isDark,
-    required this.cardBg,
-    required this.accent,
-  });
-
-  String get _timeLabel {
-    final t = trip.deliveredAt;
-    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
-    final m = t.minute.toString().padLeft(2, '0');
-    final period = t.hour < 12 ? 'AM' : 'PM';
-    return '$h:$m $period';
-  }
-
-  String get _dateLabel {
-    final t = trip.deliveredAt;
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
-    return '${months[t.month - 1]} ${t.day}';
-  }
-
-  void _showDetail(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: isDark ? AppColors.darkSurface : Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  trip.restaurant,
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                    color: isDark ? AppColors.darkText : AppColors.lightText,
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: AppColors.green.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text(
-                    'Delivered',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.green,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            _BreakdownRow(label: 'Dropoff', value: trip.dropoff, isDark: isDark),
-            const SizedBox(height: 10),
-            _BreakdownRow(label: 'Delivered on', value: '$_dateLabel · $_timeLabel', isDark: isDark),
-            const Divider(height: 24),
-            _BreakdownRow(
-              label: 'Trip earnings',
-              value: 'QAR ${trip.amount.toStringAsFixed(2)}',
-              isDark: isDark,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final dividerColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
-    final subTextColor = isDark ? AppColors.darkSubText : AppColors.lightSubText;
-    return GestureDetector(
-      onTap: () => _showDetail(context),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: cardBg,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: dividerColor),
-        ),
-        child: Row(
-          children: [
-            Column(
-              children: [
-                Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: accent)),
-                Container(width: 1, height: 18, color: dividerColor),
-                Container(
-                    width: 8,
-                    height: 8,
-                    decoration: const BoxDecoration(
-                        shape: BoxShape.circle, color: AppColors.green)),
-              ],
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(trip.restaurant,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: isDark ? AppColors.darkText : AppColors.lightText,
-                      )),
-                  const SizedBox(height: 4),
-                  Text(trip.dropoff,
-                      style: TextStyle(fontSize: 12, color: subTextColor)),
-                ],
-              ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  'QAR ${trip.amount.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.green,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(_timeLabel, style: TextStyle(fontSize: 11, color: subTextColor)),
-              ],
-            ),
-            const SizedBox(width: 4),
-            Icon(Icons.chevron_right_rounded, size: 16, color: subTextColor),
-          ],
-        ),
-      ),
-    );
-  }
-}
