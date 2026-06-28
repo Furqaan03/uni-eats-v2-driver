@@ -259,17 +259,24 @@ class FirestoreOrderService {
   /// one is what actually starts the kitchen — the vendor deliberately
   /// doesn't cook until a driver has committed.
   Stream<List<FirestoreOrder>> streamAvailableOrders() {
-    // Single-field filter only — avoids composite index requirements.
-    // orderType and driverId are checked client-side so no index needed
-    // beyond the auto-created single-field index on 'status'.
+    // Two-field filter: status + orderType. Requires a composite index on
+    // (status ASC, orderType ASC) — create it in Firebase Console →
+    // Firestore → Indexes → Composite → Add index.
+    //
+    // Why two fields instead of status-only + client filter:
+    // The security rule for orders allows a driver to read a doc only if
+    // status=='awaitingDriver' && orderType=='delivery'. If any pickup order
+    // sits in awaitingDriver state and the query returns it, Firestore
+    // evaluates the rule for that doc and denies it — which kills the ENTIRE
+    // query stream for that driver (PERMISSION_DENIED, not just that doc).
+    // Filtering server-side ensures every returned doc satisfies the rule.
     return _col
         .where('status', isEqualTo: 'awaitingDriver')
+        .where('orderType', isEqualTo: 'delivery')
         .snapshots()
         .map((snap) {
       final docs = snap.docs.where((d) {
         final data = d.data();
-        // Delivery orders only
-        if ((data['orderType'] as String?) != 'delivery') return false;
         // Skip orders already claimed (non-null, non-empty driverId)
         final driverId = data['driverId'];
         if (driverId != null && (driverId as String).isNotEmpty) return false;
