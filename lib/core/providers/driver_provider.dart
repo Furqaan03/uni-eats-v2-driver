@@ -201,6 +201,10 @@ class DriverProvider extends ChangeNotifier {
   static const _kitchenReadyTimeout = Duration(minutes: 10);
   final Map<String, Timer> _kitchenTimeouts = {};
 
+  // One status-watcher subscription per active order — keyed by orderId so
+  // dispose() and order completion can both cancel precisely without a leak.
+  final Map<String, StreamSubscription<(String?, String?)>> _activeOrderSubs = {};
+
   bool _hasIncomingOrder = false;
   bool get hasIncomingOrder => _hasIncomingOrder;
 
@@ -520,6 +524,10 @@ class DriverProvider extends ChangeNotifier {
   void dispose() {
     _availableOrdersSub?.cancel();
     _incomingCancelSub?.cancel();
+    for (final sub in _activeOrderSubs.values) {
+      sub.cancel();
+    }
+    _activeOrderSubs.clear();
     for (final t in _kitchenTimeouts.values) {
       t.cancel();
     }
@@ -675,7 +683,10 @@ class DriverProvider extends ChangeNotifier {
       _kitchenTimeouts.remove(orderId);
     });
 
-    StreamSubscription<(String?, String?)>? sub;
+    // Cancel any previous watcher for this order (e.g. re-entered after queue pop).
+    _activeOrderSubs[orderId]?.cancel();
+
+    late StreamSubscription<(String?, String?)> sub;
     sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((event) {
       final (status, cancelReason) = event;
       // 'assigned' is the vendor's fallback mapping for "ready, driver
@@ -716,19 +727,24 @@ class DriverProvider extends ChangeNotifier {
           ));
           notifyListeners();
         }
-        sub?.cancel();
+        sub.cancel();
+        _activeOrderSubs.remove(orderId);
       } else if (status == null || status == 'delivered') {
         // Doc gone, or the driver's own advanceDeliveryStep() already moved
         // it to 'delivered' and removed it from _activeOrders — nothing
         // left to watch for either way.
         _kitchenTimeouts[orderId]?.cancel();
         _kitchenTimeouts.remove(orderId);
-        sub?.cancel();
+        sub.cancel();
+        _activeOrderSubs.remove(orderId);
       }
     }, onError: (Object e) {
       debugPrint('[DriverProvider] watchActiveOrder failed: $e');
-      sub?.cancel();
+      sub.cancel();
+      _activeOrderSubs.remove(orderId);
     });
+
+    _activeOrderSubs[orderId] = sub;
   }
 
   /// Auto-reject: timer expired. Writes rejection metadata to Firestore and

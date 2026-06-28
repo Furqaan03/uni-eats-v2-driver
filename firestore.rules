@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── orders ────────────────────────────────────────────────────────────────
+    match /orders/{orderId} {
+      // Any signed-in user can read orders (driver, vendor, customer apps all need it).
+      allow read: if request.auth != null;
+
+      // Driver claiming an awaitingDriver order:
+      // Only the fields that legitimately change at claim time are permitted.
+      allow update: if request.auth != null
+        && resource.data.status == 'awaitingDriver'
+        && request.resource.data.status in ['preparing', 'assigned']
+        && request.resource.data.driverId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'driverId', 'driverName', 'noDriversAvailable']);
+
+      // Driver advancing delivery step (pickedUp → enRoute → delivered, etc.):
+      // Must already be the assigned driver; only status/timestamps/driver-specific flags change.
+      allow update: if request.auth != null
+        && resource.data.driverId == request.auth.uid
+        && resource.data.status in ['preparing', 'assigned', 'ready', 'pickedUp', 'enRoute']
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'deliveredAt', 'driverAtRestaurant']);
+
+      // Driver abandoning an order (puts it back to awaitingDriver):
+      allow update: if request.auth != null
+        && resource.data.driverId == request.auth.uid
+        && request.resource.data.status == 'awaitingDriver'
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'driverId', 'driverName', 'driverAtRestaurant',
+                       'driverCancelReason', 'noDriversAvailable', 'noDriversAvailableAt']);
+
+      // Driver flagging an unclaimed order / escalating with noDriversAvailable:
+      allow update: if request.auth != null
+        && resource.data.status == 'awaitingDriver'
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['noDriversAvailable', 'noDriversAvailableAt', 'escalatedReason',
+                       'rejectionCount', 'lastRejectedAt']);
+
+      // Vendors write orders (create + full update) — vendor auth is handled
+      // by the vendor app's own signed-in uid; we trust any authenticated
+      // user to create/update orders here since vendor UIDs aren't separated
+      // into a separate auth claim yet.
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+    }
+
+    // ── drivers ───────────────────────────────────────────────────────────────
+    match /drivers/{driverId} {
+      // Any signed-in user can read driver profiles (customer app shows driver name/rating).
+      allow read: if request.auth != null;
+      // Only the driver themselves can write their own profile/online status.
+      allow write: if request.auth != null && request.auth.uid == driverId;
+
+      // Bank details are in a sub-collection — locked to the driver only.
+      match /private/{doc} {
+        allow read, write: if request.auth != null && request.auth.uid == driverId;
+      }
+    }
+
+    // ── orderDeclines ─────────────────────────────────────────────────────────
+    match /orderDeclines/{declineId} {
+      // Only signed-in drivers can create decline records; nobody can read/edit them
+      // except via admin SDK (analytics/ops use only).
+      allow create: if request.auth != null;
+    }
+  }
+}

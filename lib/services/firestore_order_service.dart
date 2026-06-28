@@ -400,12 +400,18 @@ class FirestoreOrderService {
     }, SetOptions(merge: true));
   }
 
-  /// Sets the order to 'escalated' once it has exhausted available drivers
-  /// so the vendor app can alert the customer (cancel or self-pickup).
+  /// Escalates an order that has exhausted available drivers.
+  ///
+  /// Sets `noDriversAvailable: true` — the same flag `flagIfUnclaimedTooLong`
+  /// and `abandonDelivery` use — so the vendor and customer apps' existing
+  /// "No Drivers Available" banners and push-notification hooks fire without
+  /// any new consumers. Also records `escalatedReason` as metadata for
+  /// analytics; does NOT change `status` to 'escalated' since no consumer
+  /// in vendor/customer apps handles that status yet.
   Future<void> escalateOrder(String orderId) async {
     await _col.doc(orderId).set({
-      'status': 'escalated',
-      'escalatedAt': FieldValue.serverTimestamp(),
+      'noDriversAvailable': true,
+      'noDriversAvailableAt': FieldValue.serverTimestamp(),
       'escalatedReason': 'noDriverAvailable',
     }, SetOptions(merge: true));
   }
