@@ -22,6 +22,9 @@ class OrderAlreadyTakenException implements Exception {
   String toString() => 'This order was just taken by another driver.';
 }
 
+/// Why this order shows as urgent on the driver card.
+enum OrderUrgencyReason { none, rejectedBefore, longWait, both }
+
 /// One real completed delivery, for the Earnings screen's trip history.
 class DeliveredTrip {
   final String orderNumber;
@@ -90,6 +93,8 @@ class FirestoreOrder {
   final double total;
   final double deliveryFee;
   final List<Map<String, dynamic>> items;
+  final int rejectionCount;
+  final DateTime? createdAt;
 
   const FirestoreOrder({
     required this.id,
@@ -100,10 +105,25 @@ class FirestoreOrder {
     required this.total,
     required this.deliveryFee,
     required this.items,
+    this.rejectionCount = 0,
+    this.createdAt,
   });
 
   int get itemCount => items.fold(0, (sum, i) => sum + ((i['qty'] as int?) ?? 1));
   double get payout => kDriverPayoutPerDelivery;
+
+  Duration get waitingFor => createdAt != null
+      ? DateTime.now().difference(createdAt!)
+      : Duration.zero;
+
+  OrderUrgencyReason get urgency {
+    final longWait = waitingFor.inMinutes >= 3;
+    final rejected = rejectionCount >= 2;
+    if (rejected && longWait) return OrderUrgencyReason.both;
+    if (rejected) return OrderUrgencyReason.rejectedBefore;
+    if (longWait) return OrderUrgencyReason.longWait;
+    return OrderUrgencyReason.none;
+  }
 }
 
 class FirestoreOrderService {
@@ -163,13 +183,39 @@ class FirestoreOrderService {
   /// one is what actually starts the kitchen — the vendor deliberately
   /// doesn't cook until a driver has committed.
   Stream<List<FirestoreOrder>> streamAvailableOrders() {
+    // Single-field filter only — avoids composite index requirements.
+    // orderType and driverId are checked client-side so no index needed
+    // beyond the auto-created single-field index on 'status'.
     return _col
         .where('status', isEqualTo: 'awaitingDriver')
-        .where('orderType', isEqualTo: 'delivery')
-        .where('driverId', isNull: true)
-        .orderBy('createdAt')
         .snapshots()
-        .map((snap) => snap.docs.map((d) => _fromFirestore(d.data())).toList());
+        .map((snap) {
+      final docs = snap.docs.where((d) {
+        final data = d.data();
+        // Delivery orders only
+        if ((data['orderType'] as String?) != 'delivery') return false;
+        // Skip orders already claimed (non-null, non-empty driverId)
+        final driverId = data['driverId'];
+        if (driverId != null && (driverId as String).isNotEmpty) return false;
+        return true;
+      }).toList();
+      // Sort by createdAt ascending (oldest first) client-side.
+      // Uses Timestamp.compareTo which is safe; falls back to 0 for non-Timestamp types.
+      docs.sort((a, b) {
+        final at = a.data()['createdAt'];
+        final bt = b.data()['createdAt'];
+        if (at == null && bt == null) return 0;
+        if (at == null) return 1;
+        if (bt == null) return -1;
+        if (at is Timestamp && bt is Timestamp) return at.compareTo(bt);
+        return 0;
+      });
+      // Pass the Firestore document ID explicitly — d.data() does NOT contain
+      // the document ID, so d.data()['id'] is null if the vendor app didn't
+      // write an 'id' field. That null cast was the root cause of the stream
+      // error → "Reconnecting" loop on the Nothing Phone.
+      return docs.map((d) => _fromFirestore(d.id, d.data())).toList();
+    });
   }
 
   /// Assign this driver to an order (accept). Uses a transaction so two
@@ -181,15 +227,24 @@ class FirestoreOrderService {
   /// claiming an already-'ready' order with no driver attached, though that
   /// shouldn't happen under the normal flow.)
   Future<void> acceptOrder(String orderId) async {
+    if (kDriverId.isEmpty) {
+      throw Exception('Driver account is not fully loaded yet. Please try again.');
+    }
     final docRef = _col.doc(orderId);
     await FirebaseFirestore.instance.runTransaction((txn) async {
       final snap = await txn.get(docRef);
       final data = snap.data();
-      final status = data?['status'] as String?;
+      if (data == null) throw OrderAlreadyTakenException();
+      final status = data['status'] as String?;
+      final existingDriverId = data['driverId'];
+      // Treat empty-string driverId the same as null — it means a previous
+      // accept attempt wrote an empty ID (e.g. auth hadn't resolved yet) and
+      // the order is effectively still unclaimed.
+      final alreadyClaimed =
+          existingDriverId != null && (existingDriverId as String).isNotEmpty;
       final claimable = status == 'awaitingDriver' || status == 'ready';
-      if (data == null || data['driverId'] != null || !claimable) {
-        throw OrderAlreadyTakenException();
-      }
+      if (alreadyClaimed) throw OrderAlreadyTakenException();
+      if (!claimable) throw OrderStatusChangedException(status);
       txn.update(docRef, {
         if (status == 'awaitingDriver') 'status': 'preparing',
         if (status == 'ready') 'status': 'assigned',
@@ -203,6 +258,37 @@ class FirestoreOrderService {
   /// for the vendor to mark it 'ready' without polling.
   Stream<String?> watchOrderStatus(String orderId) {
     return _col.doc(orderId).snapshots().map((snap) => snap.data()?['status'] as String?);
+  }
+
+  /// Watches for the incoming order being cancelled by the vendor while the
+  /// driver is still deciding (within the 30-second window). Emits true when
+  /// the order is no longer claimable so the driver card can be auto-dismissed.
+  Stream<bool> watchOrderCancelled(String orderId) {
+    return _col.doc(orderId).snapshots().map((snap) {
+      if (!snap.exists) return true;
+      final status = snap.data()?['status'] as String?;
+      return status == 'cancelled' || status == 'delivered';
+    });
+  }
+
+  /// Increments the rejection counter on an order doc when the driver's timer
+  /// expires (auto-decline). Used by the vendor app / escalation logic to
+  /// decide when to alert the customer that no driver is available.
+  Future<void> recordAutoRejection(String orderId) async {
+    await _col.doc(orderId).set({
+      'rejectionCount': FieldValue.increment(1),
+      'lastRejectedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  /// Sets the order to 'escalated' once it has exhausted available drivers
+  /// so the vendor app can alert the customer (cancel or self-pickup).
+  Future<void> escalateOrder(String orderId) async {
+    await _col.doc(orderId).set({
+      'status': 'escalated',
+      'escalatedAt': FieldValue.serverTimestamp(),
+      'escalatedReason': 'noDriverAvailable',
+    }, SetOptions(merge: true));
   }
 
   /// Records that a driver declined an offered order, for later analysis —
@@ -230,6 +316,44 @@ class FirestoreOrderService {
   /// ready) never overwrites the vendor's own preparing/ready progress.
   Future<void> markArrivedAtRestaurant(String orderId) async {
     await _col.doc(orderId).update({'driverAtRestaurant': true});
+  }
+
+  /// Fetches trip history for an arbitrary date range (used by the custom
+  /// date picker on the Earnings screen). Mirrors [fetchTripHistory] but
+  /// accepts an explicit [end] bound instead of always reading to now.
+  Future<List<DeliveredTrip>> fetchTripHistoryForRange(
+    String uid,
+    DateTime start,
+    DateTime end,
+  ) async {
+    final snap = await _col
+        .where('driverId', isEqualTo: uid)
+        .where('status', isEqualTo: 'delivered')
+        .where('deliveredAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('deliveredAt', isLessThanOrEqualTo: Timestamp.fromDate(end))
+        .get();
+
+    final trips = snap.docs.map((doc) {
+      final d = doc.data();
+      final total = (d['total'] as num?)?.toDouble() ?? 0;
+      final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate() ?? DateTime.now();
+      final placedAt = (d['createdAt'] as Timestamp?)?.toDate() ?? deliveredAt;
+      final items = d['items'] as List<dynamic>? ?? const [];
+      return DeliveredTrip(
+        orderNumber: d['orderNumber'] as String? ?? '#${doc.id}',
+        restaurant: d['restaurantName'] as String? ?? 'Restaurant',
+        customerName: d['customerName'] as String? ?? 'Customer',
+        dropoff: d['deliveryAddress'] as String? ?? 'Campus',
+        amount: kDriverPayoutPerDelivery,
+        orderTotal: total,
+        itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
+        isPickup: (d['orderType'] as String?) == 'pickup',
+        placedAt: placedAt,
+        deliveredAt: deliveredAt,
+      );
+    }).toList()
+      ..sort((a, b) => b.deliveredAt.compareTo(a.deliveredAt));
+    return trips;
   }
 
   /// Real earnings/trip count for [uid]'s deliveries completed since
@@ -287,10 +411,12 @@ class FirestoreOrderService {
         .set({'isOnline': isOnline, 'name': kDriverName}, SetOptions(merge: true));
   }
 
-  static FirestoreOrder _fromFirestore(Map<String, dynamic> d) {
+  static FirestoreOrder _fromFirestore(String docId, Map<String, dynamic> d) {
     final rawItems = d['items'] as List<dynamic>? ?? [];
     return FirestoreOrder(
-      id: d['id'] as String,
+      // Firestore document ID is authoritative — d['id'] is a best-effort
+      // fallback for vendor apps that mirror the ID into the document body.
+      id: docId.isNotEmpty ? docId : (d['id'] as String? ?? docId),
       restaurant: d['restaurantName'] as String? ?? 'Restaurant',
       restaurantAddr: '${d['restaurantName'] ?? 'Restaurant'} UDST Qatar',
       deliveryAddress: d['deliveryAddress'] as String?,
@@ -298,6 +424,21 @@ class FirestoreOrderService {
       total: (d['total'] as num?)?.toDouble() ?? 0,
       deliveryFee: (d['deliveryFee'] as num?)?.toDouble() ?? 0,
       items: rawItems.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+      rejectionCount: (d['rejectionCount'] as num?)?.toInt() ?? 0,
+      createdAt: (d['createdAt'] as Timestamp?)?.toDate(),
     );
   }
+}
+
+/// Thrown when the order's status changed to something non-claimable (e.g.
+/// cancelled by the vendor) while the driver was deciding — distinct from
+/// [OrderAlreadyTakenException] so the UI can show a more accurate message.
+class OrderStatusChangedException implements Exception {
+  final String? status;
+  const OrderStatusChangedException(this.status);
+
+  @override
+  String toString() => status == 'cancelled'
+      ? 'This order was cancelled by the vendor.'
+      : 'This order is no longer available.';
 }

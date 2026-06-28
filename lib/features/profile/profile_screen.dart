@@ -21,41 +21,36 @@ class ProfileScreen extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: bg,
-      body: ListView(
+      body: SafeArea(
+        bottom: false,
+        child: ListView(
         children: [
-          // Gradient hero header
+          // Hero header — uses outer SafeArea so no inner SafeArea needed
           Container(
             height: 220,
             decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [AppColors.orangeDark, Color(0xFF1C1C1C)],
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-              ),
+              color: Color(0xFF1A1A1A),
             ),
-            child: SafeArea(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // Avatar
-                  Stack(
-                    children: [
-                      Container(
-                        width: 80,
-                        height: 80,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: const LinearGradient(
-                            colors: [AppColors.orangeLight, AppColors.orangeDark],
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Avatar
+                Stack(
+                  children: [
+                    Container(
+                      width: 80,
+                      height: 80,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFF252525),
+                        border: Border.all(color: AppColors.green, width: 2.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.green.withValues(alpha: 0.3),
+                            blurRadius: 16,
                           ),
-                          border: Border.all(color: AppColors.orange, width: 3),
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppColors.orange.withValues(alpha: 0.4),
-                              blurRadius: 20,
-                            ),
-                          ],
-                        ),
+                        ],
+                      ),
                         child: const Center(
                           child: Text('👤', style: TextStyle(fontSize: 38)),
                         ),
@@ -98,7 +93,6 @@ class ProfileScreen extends StatelessWidget {
                 ],
               ),
             ),
-          ),
           // Stats row
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
@@ -174,7 +168,7 @@ class ProfileScreen extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     decoration: BoxDecoration(
-                      color: AppColors.orange.withValues(alpha: 0.1),
+                      color: AppColors.green.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: const Center(
@@ -183,7 +177,7 @@ class ProfileScreen extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
-                          color: AppColors.orange,
+                          color: AppColors.green,
                         ),
                       ),
                     ),
@@ -203,8 +197,8 @@ class ProfileScreen extends StatelessWidget {
                   trailing: Switch(
                     value: themeP.isDark,
                     onChanged: (_) => themeP.toggle(),
-                    activeThumbColor: AppColors.orange,
-                    activeTrackColor: AppColors.orange.withValues(alpha: 0.4),
+                    activeThumbColor: AppColors.green,
+                    activeTrackColor: AppColors.green.withValues(alpha: 0.4),
                   )),
               _MenuRow(icon: Icons.help_outline, label: 'Help & Support', isDark: isDark),
               _MenuRow(icon: Icons.privacy_tip_outlined, label: 'Privacy Policy', isDark: isDark),
@@ -262,6 +256,7 @@ class ProfileScreen extends StatelessWidget {
           ),
           const SizedBox(height: 40),
         ],
+        ),
       ),
     );
   }
@@ -306,12 +301,29 @@ class _OnlineBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         if (driver.isOnline && !driver.canGoOffline) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(DriverProvider.cannotGoOfflineMessage)),
           );
           return;
+        }
+        if (driver.isOnline) {
+          final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Go Offline?'),
+              content: const Text('You will stop receiving new orders.'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Go Offline', style: TextStyle(color: AppColors.red)),
+                ),
+              ],
+            ),
+          );
+          if (confirmed != true) return;
         }
         driver.toggleOnline();
       },
@@ -420,7 +432,7 @@ class _InfoRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: AppColors.orange),
+          Icon(icon, size: 18, color: AppColors.darkSubText),
           const SizedBox(width: 12),
           Text(
             label,
@@ -512,7 +524,7 @@ class _RatingBar extends StatelessWidget {
                 value: ratio,
                 minHeight: 6,
                 backgroundColor: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-                valueColor: const AlwaysStoppedAnimation<Color>(AppColors.orange),
+                valueColor: const AlwaysStoppedAnimation<Color>(AppColors.green),
               ),
             ),
           ),
@@ -545,7 +557,7 @@ class _MenuRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 14),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: textColor ?? AppColors.orange),
+          Icon(icon, size: 18, color: textColor ?? AppColors.darkSubText),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
