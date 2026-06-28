@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
 import '../../services/firestore_order_service.dart';
+import 'widgets/date_range_sheet.dart';
 
 class EarningsScreen extends StatefulWidget {
   const EarningsScreen({super.key});
@@ -16,14 +17,17 @@ class _EarningsScreenState extends State<EarningsScreen>
   late TabController _tabs;
   late Future<List<DeliveredTrip>> _tripsFuture;
 
+  // Custom date range state
+  DateTimeRange? _customRange;
+  Future<List<DeliveredTrip>>? _customTripsFuture;
+  bool _customLoading = false;
+
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this);
+    _tabs = TabController(length: 4, vsync: this);
     _tabs.addListener(() => setState(() {}));
-    // One 30-day fetch backs all three tabs' bar charts — the 7-day buckets
-    // (Today/Week) and the 30-day bucket (Month) are just different slices
-    // of the same trip list, computed client-side below.
+    // One 30-day fetch backs Today/Week/Month — custom tab fetches on demand.
     _tripsFuture = FirestoreOrderService.instance
         .fetchTripHistory(kDriverId, DateTime.now().subtract(const Duration(days: 30)));
   }
@@ -44,6 +48,76 @@ class _EarningsScreenState extends State<EarningsScreen>
       bucket[t.deliveredAt.weekday - 1] += t.amount.round();
     }
     return bucket;
+  }
+
+  /// Buckets trips by calendar date for the custom range bar chart.
+  /// Returns (amounts, labels) aligned to the days in the range.
+  (List<int>, List<String>) _bucketByDate(
+      List<DeliveredTrip> trips, DateTimeRange range) {
+    final days = range.end.difference(range.start).inDays + 1;
+    // Cap bars at 31 to keep the chart readable; group by week beyond that.
+    final grouped = days <= 31;
+    final bucketCount = grouped ? days : ((days / 7).ceil());
+    final amounts = List<int>.filled(bucketCount, 0);
+    final labels = List<String>.filled(bucketCount, '');
+
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+
+    for (var i = 0; i < bucketCount; i++) {
+      if (grouped) {
+        final d = range.start.add(Duration(days: i));
+        labels[i] = '${d.day}/${d.month}';
+      } else {
+        final d = range.start.add(Duration(days: i * 7));
+        labels[i] = '${months[d.month - 1]} ${d.day}';
+      }
+    }
+
+    for (final t in trips) {
+      final offset = t.deliveredAt.difference(
+        DateTime(range.start.year, range.start.month, range.start.day),
+      ).inDays;
+      if (offset < 0) continue;
+      final bucketIdx = grouped ? offset : (offset ~/ 7);
+      if (bucketIdx < bucketCount) {
+        amounts[bucketIdx] += t.amount.round();
+      }
+    }
+
+    return (amounts, labels);
+  }
+
+  Future<void> _pickCustomRange(BuildContext context) async {
+    final picked = await showDateRangeSheet(
+      context,
+      initialRange: _customRange,
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _customRange = picked;
+      _customLoading = true;
+      _customTripsFuture = FirestoreOrderService.instance
+          .fetchTripHistoryForRange(
+            kDriverId,
+            DateTime(picked.start.year, picked.start.month, picked.start.day),
+            DateTime(picked.end.year, picked.end.month, picked.end.day, 23, 59, 59),
+          )
+          .then((t) {
+        if (mounted) setState(() => _customLoading = false);
+        return t;
+      });
+    });
+  }
+
+  String _formatDate(DateTime d) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return '${months[d.month - 1]} ${d.day}';
   }
 
   @override
@@ -150,6 +224,7 @@ class _EarningsScreenState extends State<EarningsScreen>
                     Tab(text: 'Today'),
                     Tab(text: 'Week'),
                     Tab(text: 'Month'),
+                    Tab(text: 'By Date'),
                   ],
                 ),
               ),
@@ -182,6 +257,18 @@ class _EarningsScreenState extends State<EarningsScreen>
                     isDark: isDark,
                     cardBg: cardBg,
                     accent: accent,
+                  ),
+                  // Custom date range tab
+                  _CustomDateTab(
+                    customRange: _customRange,
+                    customTripsFuture: _customTripsFuture,
+                    customLoading: _customLoading,
+                    isDark: isDark,
+                    cardBg: cardBg,
+                    accent: accent,
+                    onPickRange: () => _pickCustomRange(context),
+                    bucketByDate: _bucketByDate,
+                    formatDate: _formatDate,
                   ),
                 ],
               ),
@@ -261,48 +348,58 @@ class _EarningsTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       children: [
-        // Hero gradient card
+        // Hero card — dark surface, green accent mark, no gradient
         Container(
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [AppColors.orangeDark, Color(0xFFFF5500)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
+            color: isDark ? const Color(0xFF161616) : const Color(0xFF1A1A1A),
             borderRadius: BorderRadius.circular(20),
             boxShadow: [
               BoxShadow(
-                color: AppColors.orange.withValues(alpha: 0.35),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
+                color: Colors.black.withValues(alpha: 0.4),
+                blurRadius: 20,
+                offset: const Offset(0, 6),
               ),
             ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Green accent bar replaces gradient and signals "earnings active"
+              Container(
+                width: 28,
+                height: 3,
+                decoration: BoxDecoration(
+                  color: AppColors.green,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 16),
               const Text(
                 'Total Earnings',
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: Colors.white70,
+                  color: Color(0xFF666666),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               Text(
                 heroValue,
                 style: const TextStyle(
                   fontSize: 36,
                   fontWeight: FontWeight.w900,
-                  color: Colors.white,
+                  color: Color(0xFFF0F0F0),
+                  letterSpacing: -0.5,
                 ),
               ),
               const SizedBox(height: 4),
               Text(
                 heroSub,
-                style: const TextStyle(fontSize: 13, color: Colors.white70),
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: Color(0xFF666666),
+                ),
               ),
             ],
           ),
@@ -535,7 +632,11 @@ class _InteractiveBarChartState extends State<_InteractiveBarChart> {
             behavior: HitTestBehavior.opaque,
             onTapDown: (d) => _selectFromDx(d.localPosition.dx, constraints.maxWidth),
             child: CustomPaint(
-              painter: _BarChartPainter(data: widget.data, accent: widget.accent),
+              painter: _BarChartPainter(
+                data: widget.data,
+                accent: widget.accent,
+                selectedIndex: _selected,
+              ),
               child: const SizedBox(height: 100, width: double.infinity),
             ),
           ),
@@ -545,35 +646,356 @@ class _InteractiveBarChartState extends State<_InteractiveBarChart> {
   }
 }
 
+// ─── Custom date range tab ────────────────────────────────────────────────────
+
+class _CustomDateTab extends StatelessWidget {
+  final DateTimeRange? customRange;
+  final Future<List<DeliveredTrip>>? customTripsFuture;
+  final bool customLoading;
+  final bool isDark;
+  final Color cardBg;
+  final Color accent;
+  final VoidCallback onPickRange;
+  final (List<int>, List<String>) Function(List<DeliveredTrip>, DateTimeRange) bucketByDate;
+  final String Function(DateTime) formatDate;
+
+  const _CustomDateTab({
+    required this.customRange,
+    required this.customTripsFuture,
+    required this.customLoading,
+    required this.isDark,
+    required this.cardBg,
+    required this.accent,
+    required this.onPickRange,
+    required this.bucketByDate,
+    required this.formatDate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = isDark ? AppColors.darkText : AppColors.lightText;
+    final subColor = isDark ? AppColors.darkSubText : AppColors.lightSubText;
+    final borderColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
+
+    // Picker button — always shown at the top
+    Widget pickerButton = GestureDetector(
+      onTap: onPickRange,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.calendar_month_rounded, size: 18, color: accent),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                customRange == null
+                    ? 'Select a date range'
+                    : '${formatDate(customRange!.start)}  →  ${formatDate(customRange!.end)}',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: textColor,
+                ),
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, size: 18, color: subColor),
+          ],
+        ),
+      ),
+    );
+
+    if (customRange == null) {
+      return ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        children: [
+          pickerButton,
+          const SizedBox(height: 32),
+          Center(
+            child: Column(
+              children: [
+                Icon(Icons.date_range_rounded, size: 48, color: subColor),
+                const SizedBox(height: 12),
+                Text(
+                  'Pick a date range to see\nyour earnings breakdown',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: subColor),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    return FutureBuilder<List<DeliveredTrip>>(
+      future: customTripsFuture,
+      builder: (context, snapshot) {
+        if (customLoading || snapshot.connectionState == ConnectionState.waiting) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: accent),
+                const SizedBox(height: 12),
+                Text('Loading earnings…', style: TextStyle(color: subColor, fontSize: 13)),
+              ],
+            ),
+          );
+        }
+
+        final trips = snapshot.data ?? const [];
+        final total = trips.fold<double>(0, (s, t) => s + t.amount);
+        final (amounts, labels) = bucketByDate(trips, customRange!);
+        final rangeDays =
+            customRange!.end.difference(customRange!.start).inDays + 1;
+
+        return ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          children: [
+            pickerButton,
+            const SizedBox(height: 16),
+            // Hero card — matches _EarningsTab style
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161616),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.4),
+                    blurRadius: 20,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 28,
+                    height: 3,
+                    decoration: BoxDecoration(
+                      color: AppColors.green,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '${formatDate(customRange!.start)} – ${formatDate(customRange!.end)}',
+                    style: const TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF666666)),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'QAR ${total.toStringAsFixed(2)}',
+                    style: const TextStyle(
+                        fontSize: 36, fontWeight: FontWeight.w900, color: Color(0xFFF0F0F0), letterSpacing: -0.5),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${trips.length} trip${trips.length == 1 ? '' : 's'} · $rangeDays day${rangeDays == 1 ? '' : 's'}',
+                    style: const TextStyle(fontSize: 13, color: Color(0xFF666666)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            if (trips.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: cardBg,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: borderColor),
+                ),
+                child: Column(
+                  children: [
+                    Icon(Icons.inbox_rounded, size: 36, color: subColor),
+                    const SizedBox(height: 10),
+                    Text('No deliveries in this range', style: TextStyle(color: subColor)),
+                  ],
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: cardBg,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: borderColor),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Earnings Overview',
+                      style: TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w800, color: textColor),
+                    ),
+                    const SizedBox(height: 16),
+                    _LabelledBarChart(
+                      amounts: amounts,
+                      labels: labels,
+                      isDark: isDark,
+                      accent: accent,
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 24),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ─── Bar chart with external date labels ─────────────────────────────────────
+
+class _LabelledBarChart extends StatefulWidget {
+  final List<int> amounts;
+  final List<String> labels;
+  final bool isDark;
+  final Color accent;
+  const _LabelledBarChart({
+    required this.amounts,
+    required this.labels,
+    required this.isDark,
+    required this.accent,
+  });
+
+  @override
+  State<_LabelledBarChart> createState() => _LabelledBarChartState();
+}
+
+class _LabelledBarChartState extends State<_LabelledBarChart> {
+  int? _selected;
+
+  void _selectFromDx(double dx, double width) {
+    if (width <= 0 || widget.amounts.isEmpty) return;
+    final gap = width / widget.amounts.length;
+    final index = (dx / gap).floor().clamp(0, widget.amounts.length - 1);
+    setState(() => _selected = _selected == index ? null : index);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final subColor = widget.isDark ? AppColors.darkSubText : AppColors.lightSubText;
+
+    // Only show every Nth label to avoid overlap when there are many bars.
+    final count = widget.labels.length;
+    final stride = count <= 7
+        ? 1
+        : count <= 14
+            ? 2
+            : count <= 31
+                ? 4
+                : 1; // weekly grouped — all labels shown
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          child: _selected == null
+              ? const SizedBox(height: 0, width: double.infinity)
+              : Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: widget.accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${widget.labels[_selected!]} · QAR ${widget.amounts[_selected!]}',
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w800, color: widget.accent),
+                    ),
+                  ),
+                ),
+        ),
+        LayoutBuilder(
+          builder: (context, constraints) => GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) =>
+                _selectFromDx(d.localPosition.dx, constraints.maxWidth),
+            child: CustomPaint(
+              painter: _BarChartPainter(
+                data: widget.amounts,
+                accent: widget.accent,
+                selectedIndex: _selected,
+              ),
+              child: const SizedBox(height: 100, width: double.infinity),
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: List.generate(count, (i) {
+            final show = i % stride == 0 || i == count - 1;
+            return Expanded(
+              child: Text(
+                show ? widget.labels[i] : '',
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 8, color: subColor),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+}
+
 class _BarChartPainter extends CustomPainter {
   final List<int> data;
   final Color accent;
-  _BarChartPainter({required this.data, required this.accent});
+  final int? selectedIndex;
+  _BarChartPainter({
+    required this.data,
+    required this.accent,
+    this.selectedIndex,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final max = data.reduce((a, b) => a > b ? a : b).toDouble();
+    if (data.isEmpty) return;
+    final maxVal = data.reduce((a, b) => a > b ? a : b).toDouble();
+    if (maxVal == 0) return;
     final barW = size.width / (data.length * 1.6);
     final gap = size.width / data.length;
-    final fill = Paint()
-      ..style = PaintingStyle.fill
-      ..color = accent;
+    final hasSelection = selectedIndex != null;
 
-    // Every bar gets the full accent color — the tapped bar's value already
-    // surfaces in the label above, so the bars themselves don't need to dim
-    // each other out.
     for (var i = 0; i < data.length; i++) {
-      final h = (data[i] / max) * size.height;
+      if (data[i] == 0) continue;
+      // Active bar = green; inactive (when something else is selected) = dim gray.
+      final isActive = !hasSelection || selectedIndex == i;
+      final color = isActive ? AppColors.green : const Color(0xFF2D2D2D);
+      final fill = Paint()
+        ..style = PaintingStyle.fill
+        ..color = color;
+      final h = (data[i] / maxVal) * size.height;
       final x = i * gap + (gap - barW) / 2;
-      final rrect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(x, size.height - h, barW, h),
-        const Radius.circular(4),
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, size.height - h, barW, h),
+          const Radius.circular(4),
+        ),
+        fill,
       );
-      canvas.drawRRect(rrect, fill);
     }
   }
 
   @override
-  bool shouldRepaint(_BarChartPainter old) => old.data != data || old.accent != accent;
+  bool shouldRepaint(_BarChartPainter old) =>
+      old.data != data || old.accent != accent || old.selectedIndex != selectedIndex;
 }
 

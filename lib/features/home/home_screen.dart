@@ -22,6 +22,26 @@ class HomeScreen extends StatelessWidget {
         // Full-screen map
         Positioned.fill(child: MockMap(isDark: isDark)),
 
+        // Status bar scrim — gradient from semi-opaque to transparent so
+        // system status icons remain readable over map tiles at all times.
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: IgnorePointer(
+            child: Container(
+              height: MediaQuery.of(context).padding.top + 80,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xCC000000), Color(0x00000000)],
+                ),
+              ),
+            ),
+          ),
+        ),
+
         // Top bar + toggle — anchored to the top edge
         Positioned(
           top: 0,
@@ -108,6 +128,40 @@ class HomeScreen extends StatelessWidget {
                 ),
                 // Toggle below the row — never overlaps
                 _OnlineToggle(isDark: isDark, driver: driver),
+                // Queued order badge — shown when driver is at max concurrent orders
+                if (driver.hasQueuedOrder)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: AppColors.orange.withValues(alpha: 0.9),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.orange.withValues(alpha: 0.4),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('⏳', style: TextStyle(fontSize: 13)),
+                          SizedBox(width: 6),
+                          Text(
+                            '1 order waiting — finish a delivery to see it',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -147,9 +201,9 @@ Future<void> _confirmGoOffline(BuildContext context, DriverProvider driver) asyn
       builder: (_) => AlertDialog(
         title: const Text('Delivery in Progress',
             style: TextStyle(fontWeight: FontWeight.w800)),
-        content: Text(
+        content: const Text(
           DriverProvider.cannotGoOfflineMessage,
-          style: const TextStyle(fontSize: 13),
+          style: TextStyle(fontSize: 13),
         ),
         actions: [
           TextButton(
@@ -346,121 +400,113 @@ class _BottomStatsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bg = isDark ? const Color(0xFF111111) : Colors.white;
+    final textColor = isDark ? const Color(0xFFF0F0F0) : const Color(0xFF111111);
+    final subColor = isDark ? const Color(0xFF666666) : const Color(0xFF888888);
+
     return Container(
       decoration: BoxDecoration(
-        color: isDark ? AppColors.darkSurface : Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        color: bg,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.18),
-            blurRadius: 24,
-            offset: const Offset(0, -4),
+            color: Colors.black.withValues(alpha: 0.28),
+            blurRadius: 32,
+            offset: const Offset(0, -8),
           ),
         ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          const SizedBox(height: 10),
           // Handle
-          const SizedBox(height: 12),
           Center(
             child: Container(
-              width: 36,
-              height: 4,
+              width: 32,
+              height: 3,
               decoration: BoxDecoration(
-                color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                color: isDark ? const Color(0xFF333333) : const Color(0xFFDDDDDD),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
           ),
-          const SizedBox(height: 16),
-          // Stats row
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.fromLTRB(24, 18, 24, 4),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _Stat(
-                  label: 'Today\'s Earnings',
-                  value: 'QAR ${driver.todayEarnings.toStringAsFixed(2)}',
-                  icon: '💰',
-                  isDark: isDark,
+                // Primary: earnings + trip count
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'QAR ${driver.todayEarnings.toStringAsFixed(0)}',
+                        style: TextStyle(
+                          fontSize: 30,
+                          fontWeight: FontWeight.w900,
+                          color: textColor,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        'Today · ${driver.todayTrips} ${driver.todayTrips == 1 ? 'trip' : 'trips'}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: subColor,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                _divider(isDark),
-                _Stat(
-                  label: 'Trips',
-                  value: '${driver.todayTrips}',
-                  icon: '🛵',
-                  isDark: isDark,
-                ),
-                _divider(isDark),
-                _Stat(
-                  label: 'Rating',
-                  value: driver.rating.toStringAsFixed(2),
-                  icon: '⭐',
-                  isDark: isDark,
-                ),
-                _divider(isDark),
-                _Stat(
-                  label: 'Accept Rate',
-                  value: '${driver.acceptanceRate}%',
-                  icon: '✅',
-                  isDark: isDark,
+                // Secondary: rating + accept rate
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.star_rounded, size: 13, color: AppColors.yellow),
+                        const SizedBox(width: 4),
+                        Text(
+                          driver.rating.toStringAsFixed(1),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: textColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 7),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.check_circle_rounded,
+                            size: 13, color: AppColors.green),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${driver.acceptanceRate}%',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: textColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 20),
-          SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
+          SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
         ],
       ),
-    );
-  }
-
-  Widget _divider(bool isDark) => Container(
-        width: 1,
-        height: 40,
-        color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-      );
-}
-
-class _Stat extends StatelessWidget {
-  final String label;
-  final String value;
-  final String icon;
-  final bool isDark;
-  const _Stat({
-    required this.label,
-    required this.value,
-    required this.icon,
-    required this.isDark,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Text(icon, style: const TextStyle(fontSize: 18)),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w900,
-            color: isDark ? AppColors.darkText : AppColors.lightText,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 9,
-            fontWeight: FontWeight.w500,
-            color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-          ),
-          textAlign: TextAlign.center,
-        ),
-      ],
     );
   }
 }

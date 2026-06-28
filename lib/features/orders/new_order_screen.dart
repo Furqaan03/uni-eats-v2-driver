@@ -5,6 +5,8 @@ import '../../core/theme/app_colors.dart';
 import '../../core/providers/driver_provider.dart';
 import '../../services/firestore_order_service.dart';
 
+// ignore_for_file: use_build_context_synchronously
+
 class NewOrderScreen extends StatefulWidget {
   /// True when the card sits at the very bottom of the screen (no active delivery bar below it).
   /// Controls whether SafeArea adds bottom inset for the home indicator.
@@ -20,6 +22,9 @@ class _NewOrderScreenState extends State<NewOrderScreen>
   late AnimationController _timerCtrl;
   static const _totalSeconds = 30;
   bool _isCritical = false;
+  // Guards against double-tap on Accept — disabled the moment the first tap
+  // fires so the async Firestore write can't be triggered twice.
+  bool _accepting = false;
 
   @override
   void initState() {
@@ -181,6 +186,8 @@ class _NewOrderScreenState extends State<NewOrderScreen>
   Widget build(BuildContext context) {
     final driver = context.read<DriverProvider>();
     final accent = _isCritical ? AppColors.red : AppColors.yellow;
+    final urgency = driver.firestoreIncoming?.urgency ?? OrderUrgencyReason.none;
+    final waitingMin = driver.firestoreIncoming?.waitingFor.inMinutes ?? 0;
 
     // This screen is only ever shown while driver.hasIncomingOrder is true,
     // which is only ever set alongside a real Firestore order or a mock
@@ -280,6 +287,44 @@ class _NewOrderScreenState extends State<NewOrderScreen>
               ),
               const SizedBox(height: 14),
 
+              // Urgency badge — shown when order has been waiting or rejected before
+              if (urgency != OrderUrgencyReason.none) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFF6B00).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFFFF6B00).withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Text('⚡', style: TextStyle(fontSize: 14)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          switch (urgency) {
+                            OrderUrgencyReason.both =>
+                              'Waiting ${waitingMin}m · declined by other drivers',
+                            OrderUrgencyReason.longWait =>
+                              'Customer has been waiting ${waitingMin} min',
+                            OrderUrgencyReason.rejectedBefore =>
+                              'Declined by other drivers — be the hero',
+                            OrderUrgencyReason.none => '',
+                          },
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFFFF6B00),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+              ],
+
               // Route card
               _RouteCard(
                 restaurant: restaurant,
@@ -339,10 +384,14 @@ class _NewOrderScreenState extends State<NewOrderScreen>
                   Expanded(
                     flex: 2,
                     child: GestureDetector(
-                      onTap: () {
-                        _timerCtrl.stop();
-                        driver.acceptOrder();
-                      },
+                      onTap: _accepting
+                          ? null
+                          : () async {
+                              setState(() => _accepting = true);
+                              _timerCtrl.stop();
+                              await driver.acceptOrder();
+                              if (mounted) setState(() => _accepting = false);
+                            },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 300),
                         padding: const EdgeInsets.symmetric(vertical: 14),
@@ -361,15 +410,24 @@ class _NewOrderScreenState extends State<NewOrderScreen>
                             ),
                           ],
                         ),
-                        child: const Text(
-                          'Accept Order',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w800,
-                            color: Colors.white,
-                          ),
-                        ),
+                        child: _accepting
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'Accept Order',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white,
+                                ),
+                              ),
                       ),
                     ),
                   ),

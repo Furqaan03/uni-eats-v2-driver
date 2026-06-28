@@ -182,6 +182,25 @@ class DriverProvider extends ChangeNotifier {
   // Firestore order ID for the currently incoming order (null = mock mode)
   String? _incomingFirestoreOrderId;
 
+  // Orders the driver auto-rejected (timer expiry) — cooldown prevents
+  // the same order from immediately re-appearing in the stream listener
+  // and causing a confusing rapid-fire loop or false "already taken" errors.
+  final Map<String, DateTime> _recentlyRejectedOrders = {};
+  static const _rejectionCooldown = Duration(seconds: 45);
+
+  // When the driver is at max concurrent orders, incoming Firestore orders
+  // are queued here — presented automatically after a delivery completes.
+  String? _queuedFirestoreOrderId;
+  bool get hasQueuedOrder => _queuedFirestoreOrderId != null;
+
+  // Cancellation listener while the driver is deciding on an incoming order.
+  StreamSubscription<bool>? _incomingCancelSub;
+
+  // Kitchen-ready timeout per accepted order: if the vendor never marks
+  // the order ready within this window, the driver gets a warning notification.
+  static const _kitchenReadyTimeout = Duration(minutes: 10);
+  final Map<String, Timer> _kitchenTimeouts = {};
+
   bool _hasIncomingOrder = false;
   bool get hasIncomingOrder => _hasIncomingOrder;
 
@@ -366,32 +385,56 @@ class DriverProvider extends ChangeNotifier {
     _availableOrdersSub = FirestoreOrderService.instance
         .streamAvailableOrders()
         .listen((orders) {
+      if (!_isOnline) return;
+
       // Runs regardless of whether *this* driver can take a new order right
-      // now (busy, offline-pending, at capacity) — staleness is a property
-      // of the order, not of this driver's own eligibility, and any online
-      // driver's app receiving this snapshot is a valid one to notice it.
+      // now (busy, at capacity) — staleness is a property of the order, not
+      // of this driver's own eligibility, and any online driver's app
+      // receiving this snapshot is a valid one to notice it. Deliberately
+      // placed before the candidate-filtering/queueing logic below, which
+      // is about whether *this* driver gets offered the order, not about
+      // whether the order itself needs flagging.
       for (final order in orders) {
         FirestoreOrderService.instance
             .flagIfUnclaimedTooLong(order)
             .catchError((e) => debugPrint('[DriverProvider] flagIfUnclaimedTooLong failed: $e'));
       }
 
-      if (!_isOnline || _hasIncomingOrder || _activeOrders.length >= _kMaxOrders) return;
       if (orders.isEmpty) return;
-      final first = orders.first;
-      _incomingFirestoreOrderId = first.id;
-      _incomingTemplate = null; // clear mock template
-      _hasIncomingOrder = true;
-      addNotification(DriverNotification(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        title: 'New Order — ${first.restaurant}',
-        body: '${first.restaurant} → ${first.deliveryAddress ?? 'Campus'} • QAR ${first.payout.toStringAsFixed(2)}',
-        icon: '🛵',
-        time: DateTime.now(),
-      ));
-      // Expose Firestore order fields for the incoming order screen
-      _firestoreIncoming = first;
-      notifyListeners();
+
+      // Purge expired cooldown entries so the map doesn't grow unbounded.
+      final now = DateTime.now();
+      _recentlyRejectedOrders.removeWhere(
+        (_, t) => now.difference(t) > _rejectionCooldown,
+      );
+
+      // Skip orders the driver just auto-rejected — avoids rapid re-loop.
+      final candidates = orders
+          .where((o) => !_recentlyRejectedOrders.containsKey(o.id))
+          .toList();
+      if (candidates.isEmpty) return;
+
+      final first = candidates.first;
+
+      if (_hasIncomingOrder) return;
+
+      if (_activeOrders.length >= _kMaxOrders) {
+        // Driver is at capacity — queue the order for after a delivery completes.
+        if (_queuedFirestoreOrderId != first.id) {
+          _queuedFirestoreOrderId = first.id;
+          addNotification(DriverNotification(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            title: 'Order Waiting',
+            body: 'New order from ${first.restaurant} — complete a delivery to see it.',
+            icon: '⏳',
+            time: DateTime.now(),
+          ));
+          notifyListeners();
+        }
+        return;
+      }
+
+      _presentIncomingOrder(first);
     }, onError: (Object e) {
       // Most likely cause: the composite index this query needs is still
       // building. The stream dies on error and won't come back on its
@@ -404,6 +447,55 @@ class DriverProvider extends ChangeNotifier {
         if (_isOnline) _subscribeToAvailableOrders();
       });
     });
+  }
+
+  void _presentIncomingOrder(FirestoreOrder order) {
+    _incomingFirestoreOrderId = order.id;
+    _incomingTemplate = null;
+    _hasIncomingOrder = true;
+    _firestoreIncoming = order;
+
+    final urgencyLabel = switch (order.urgency) {
+      OrderUrgencyReason.both =>
+        '⚡ Urgent — waited ${order.waitingFor.inMinutes}m, already declined by others',
+      OrderUrgencyReason.longWait =>
+        '⏱ Waiting ${order.waitingFor.inMinutes} min for a driver',
+      OrderUrgencyReason.rejectedBefore => '⚡ Declined ${order.rejectionCount}x — needs you',
+      OrderUrgencyReason.none => null,
+    };
+
+    addNotification(DriverNotification(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: urgencyLabel ?? 'New Order — ${order.restaurant}',
+      body: '${order.restaurant} → ${order.deliveryAddress ?? 'Campus'} • QAR ${order.payout.toStringAsFixed(2)}',
+      icon: order.urgency != OrderUrgencyReason.none ? '⚡' : '🛵',
+      time: DateTime.now(),
+    ));
+
+    // Watch for the vendor cancelling the order while the driver decides.
+    _incomingCancelSub?.cancel();
+    _incomingCancelSub = FirestoreOrderService.instance
+        .watchOrderCancelled(order.id)
+        .listen((cancelled) {
+      if (cancelled && _hasIncomingOrder && _incomingFirestoreOrderId == order.id) {
+        _hasIncomingOrder = false;
+        _incomingFirestoreOrderId = null;
+        _firestoreIncoming = null;
+        _incomingTemplate = null;
+        _incomingCancelSub?.cancel();
+        _incomingCancelSub = null;
+        addNotification(DriverNotification(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          title: 'Order Cancelled',
+          body: 'The vendor cancelled the order from ${order.restaurant}.',
+          icon: '❌',
+          time: DateTime.now(),
+        ));
+        notifyListeners();
+      }
+    });
+
+    notifyListeners();
   }
 
   // Firestore incoming order data (null in mock mode)
@@ -427,6 +519,10 @@ class DriverProvider extends ChangeNotifier {
   @override
   void dispose() {
     _availableOrdersSub?.cancel();
+    _incomingCancelSub?.cancel();
+    for (final t in _kitchenTimeouts.values) {
+      t.cancel();
+    }
     super.dispose();
   }
 
@@ -502,15 +598,24 @@ class DriverProvider extends ChangeNotifier {
     try {
       await FirestoreOrderService.instance.acceptOrder(fsOrderId);
     } catch (e) {
-      errorMessage = e is OrderAlreadyTakenException
-          ? e.toString()
-          : 'Could not accept this order — check your connection and try again.';
+      if (e is OrderAlreadyTakenException) {
+        errorMessage = e.toString();
+      } else if (e is OrderStatusChangedException) {
+        errorMessage = e.toString();
+      } else {
+        errorMessage = 'Could not accept this order — check your connection and try again.';
+      }
+      _incomingCancelSub?.cancel();
+      _incomingCancelSub = null;
       _hasIncomingOrder = false;
       _incomingFirestoreOrderId = null;
       _firestoreIncoming = null;
       notifyListeners();
       return;
     }
+
+    _incomingCancelSub?.cancel();
+    _incomingCancelSub = null;
 
     final order = ActiveOrder._(
       id: fsOrderId,
@@ -540,10 +645,11 @@ class DriverProvider extends ChangeNotifier {
     _watchActiveOrder(fsOrderId, order.restaurant);
   }
 
-  /// Watches an order for the entire time it's in [_activeOrders] — both to
-  /// notify the driver once the vendor marks it 'ready', and to catch the
-  /// vendor cancelling it after the driver already committed to it. A
-  /// previous version of this stopped listening the moment the order hit
+  /// Watches an order for the entire time it's in [_activeOrders] — to
+  /// notify the driver once the vendor marks it 'ready', to alert them if
+  /// the kitchen is taking too long, and to catch the vendor cancelling it
+  /// after the driver already committed to it. A previous version of the
+  /// cancellation-watching half stopped listening the moment the order hit
   /// 'ready' (or never started watching again afterward), so a vendor
   /// cancellation arriving any time after that point was completely missed:
   /// the order just sat in the driver's active list forever with no signal
@@ -551,6 +657,24 @@ class DriverProvider extends ChangeNotifier {
   /// allows it from 'preparing'/'ready' too (not just 'awaitingDriver'), so
   /// this isn't just a theoretical race — see ORDER_LIFECYCLE.md.
   void _watchActiveOrder(String orderId, String restaurant) {
+    // Kitchen delay safety net: if the vendor never marks the order ready
+    // within the timeout window, alert the driver so they can follow up.
+    _kitchenTimeouts[orderId]?.cancel();
+    _kitchenTimeouts[orderId] = Timer(_kitchenReadyTimeout, () {
+      final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+      if (idx != -1 && !_activeOrders[idx].isReady) {
+        addNotification(DriverNotification(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          title: 'Kitchen Delay ⚠️',
+          body: '$restaurant hasn\'t marked the order ready after ${_kitchenReadyTimeout.inMinutes} min. Contact them directly.',
+          icon: '⚠️',
+          time: DateTime.now(),
+        ));
+        notifyListeners();
+      }
+      _kitchenTimeouts.remove(orderId);
+    });
+
     StreamSubscription<(String?, String?)>? sub;
     sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((event) {
       final (status, cancelReason) = event;
@@ -558,6 +682,8 @@ class DriverProvider extends ChangeNotifier {
       // matched but not yet there" (see firestore_order_service.dart) — the
       // kitchen is done either way, so either status string unlocks pickup.
       if (status == 'ready' || status == 'assigned') {
+        _kitchenTimeouts[orderId]?.cancel();
+        _kitchenTimeouts.remove(orderId);
         final idx = _activeOrders.indexWhere((o) => o.id == orderId);
         if (idx != -1 && !_activeOrders[idx].isReady) {
           _activeOrders[idx].isReady = true;
@@ -573,6 +699,8 @@ class DriverProvider extends ChangeNotifier {
         // Keep watching — don't cancel here. The vendor can still cancel
         // after marking ready, and the driver needs to hear about it too.
       } else if (status == 'cancelled') {
+        _kitchenTimeouts[orderId]?.cancel();
+        _kitchenTimeouts.remove(orderId);
         final idx = _activeOrders.indexWhere((o) => o.id == orderId);
         if (idx != -1) {
           _activeOrders.removeAt(idx);
@@ -593,6 +721,8 @@ class DriverProvider extends ChangeNotifier {
         // Doc gone, or the driver's own advanceDeliveryStep() already moved
         // it to 'delivered' and removed it from _activeOrders — nothing
         // left to watch for either way.
+        _kitchenTimeouts[orderId]?.cancel();
+        _kitchenTimeouts.remove(orderId);
         sub?.cancel();
       }
     }, onError: (Object e) {
@@ -601,25 +731,79 @@ class DriverProvider extends ChangeNotifier {
     });
   }
 
+  /// Auto-reject: timer expired. Writes rejection metadata to Firestore and
+  /// marks the order in the cooldown map so it isn't re-presented immediately.
   void rejectOrder() {
+    final rejectedId = _incomingFirestoreOrderId;
+    final rejectedOrder = _firestoreIncoming;
+    _incomingCancelSub?.cancel();
+    _incomingCancelSub = null;
     _hasIncomingOrder = false;
     _incomingTemplate = null;
     _incomingFirestoreOrderId = null;
     _firestoreIncoming = null;
     notifyListeners();
+
+    if (kUseFirebase && rejectedId != null) {
+      // Add to cooldown before the async write so the stream listener can't
+      // re-present it in the gap between notifyListeners and the write completing.
+      _recentlyRejectedOrders[rejectedId] = DateTime.now();
+
+      FirestoreOrderService.instance
+          .recordAutoRejection(rejectedId)
+          .then((_) {
+            // If this order has now been rejected enough times and has been
+            // waiting long enough, escalate so the vendor can alert the customer.
+            final waitMinutes = rejectedOrder?.waitingFor.inMinutes ?? 0;
+            final rejections = (rejectedOrder?.rejectionCount ?? 0) + 1;
+            if (rejections >= 3 && waitMinutes >= 5) {
+              FirestoreOrderService.instance
+                  .escalateOrder(rejectedId)
+                  .catchError((Object e) {
+                    debugPrint('[Firestore] escalateOrder failed: $e');
+                  });
+            }
+          })
+          .catchError((Object e) {
+            debugPrint('[Firestore] recordAutoRejection failed: $e');
+          });
+    }
   }
 
+  /// Manual decline with a reason (driver chose to decline, not timer expiry).
   void declineWithReason(String reason) {
     final declinedOrderId = _incomingFirestoreOrderId;
+    final declinedOrder = _firestoreIncoming;
+    _incomingCancelSub?.cancel();
+    _incomingCancelSub = null;
     _hasIncomingOrder = false;
     _incomingTemplate = null;
     _incomingFirestoreOrderId = null;
     _firestoreIncoming = null;
     notifyListeners();
+
     if (kUseFirebase && declinedOrderId != null) {
+      _recentlyRejectedOrders[declinedOrderId] = DateTime.now();
       FirestoreOrderService.instance
           .recordDecline(declinedOrderId, reason)
           .catchError((e) => debugPrint('[Firestore] recordDecline failed: $e'));
+      // Also increment rejectionCount on the order so urgency badges stay accurate.
+      FirestoreOrderService.instance
+          .recordAutoRejection(declinedOrderId)
+          .then((_) {
+            final waitMinutes = declinedOrder?.waitingFor.inMinutes ?? 0;
+            final rejections = (declinedOrder?.rejectionCount ?? 0) + 1;
+            if (rejections >= 3 && waitMinutes >= 5) {
+              FirestoreOrderService.instance
+                  .escalateOrder(declinedOrderId)
+                  .catchError((Object e) {
+                    debugPrint('[Firestore] escalateOrder failed: $e');
+                  });
+            }
+          })
+          .catchError((Object e) {
+            debugPrint('[Firestore] recordAutoRejection failed: $e');
+          });
     }
   }
 
@@ -689,6 +873,8 @@ class DriverProvider extends ChangeNotifier {
       case DeliveryStep.delivered:
         _todayEarnings += order.payout;
         _todayTrips += 1;
+        _kitchenTimeouts[orderId]?.cancel();
+        _kitchenTimeouts.remove(orderId);
         _activeOrders.removeAt(idx);
         _selectedOrderId = _activeOrders.isNotEmpty ? _activeOrders.first.id : null;
         addNotification(DriverNotification(
@@ -703,6 +889,10 @@ class DriverProvider extends ChangeNotifier {
               .recordCompletedDelivery(kDriverId, order.payout)
               .catchError((e) => debugPrint('[Firestore] recordCompletedDelivery failed: $e'));
         }
+        // If an order was queued while the driver was at capacity, clear the
+        // queued ID — the active stream listener will re-deliver it now that
+        // the slot is open (as long as it's still awaitingDriver in Firestore).
+        _queuedFirestoreOrderId = null;
     }
     notifyListeners();
     if (kUseFirebase && firestoreStatus != null) {
