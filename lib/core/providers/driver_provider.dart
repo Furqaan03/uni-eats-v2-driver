@@ -347,6 +347,11 @@ class DriverProvider extends ChangeNotifier {
     } else {
       _availableOrdersSub?.cancel();
       _availableOrdersSub = null;
+      // An incoming offer the driver hasn't accepted yet must never block
+      // going offline — only an order they've actually committed to
+      // (in _activeOrders) does that. Declining it on their behalf here
+      // means going offline always just works, with no leftover prompt.
+      if (_hasIncomingOrder) declineWithReason('Driver went offline');
       if (kUseFirebase) {
         FirestoreOrderService.instance
             .setDriverOnline(false)
@@ -361,6 +366,16 @@ class DriverProvider extends ChangeNotifier {
     _availableOrdersSub = FirestoreOrderService.instance
         .streamAvailableOrders()
         .listen((orders) {
+      // Runs regardless of whether *this* driver can take a new order right
+      // now (busy, offline-pending, at capacity) — staleness is a property
+      // of the order, not of this driver's own eligibility, and any online
+      // driver's app receiving this snapshot is a valid one to notice it.
+      for (final order in orders) {
+        FirestoreOrderService.instance
+            .flagIfUnclaimedTooLong(order)
+            .catchError((e) => debugPrint('[DriverProvider] flagIfUnclaimedTooLong failed: $e'));
+      }
+
       if (!_isOnline || _hasIncomingOrder || _activeOrders.length >= _kMaxOrders) return;
       if (orders.isEmpty) return;
       final first = orders.first;
@@ -400,6 +415,7 @@ class DriverProvider extends ChangeNotifier {
     _isOnline = false;
     _availableOrdersSub?.cancel();
     _availableOrdersSub = null;
+    if (_hasIncomingOrder) declineWithReason('Driver went offline');
     if (kUseFirebase) {
       FirestoreOrderService.instance
           .setDriverOnline(false)
@@ -521,16 +537,23 @@ class DriverProvider extends ChangeNotifier {
     _incomingFirestoreOrderId = null;
     _firestoreIncoming = null;
     notifyListeners();
-    _watchForReady(fsOrderId, order.restaurant);
+    _watchActiveOrder(fsOrderId, order.restaurant);
   }
 
-  /// Claiming an order while it's 'awaitingDriver' starts the kitchen, but
-  /// the driver still has to wait for the food itself — watch for the
-  /// vendor marking it 'ready' and notify the driver instead of leaving
-  /// them to keep checking back manually.
-  void _watchForReady(String orderId, String restaurant) {
-    StreamSubscription<String?>? sub;
-    sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((status) {
+  /// Watches an order for the entire time it's in [_activeOrders] — both to
+  /// notify the driver once the vendor marks it 'ready', and to catch the
+  /// vendor cancelling it after the driver already committed to it. A
+  /// previous version of this stopped listening the moment the order hit
+  /// 'ready' (or never started watching again afterward), so a vendor
+  /// cancellation arriving any time after that point was completely missed:
+  /// the order just sat in the driver's active list forever with no signal
+  /// that it had been pulled. The Firestore rule for vendor cancellation
+  /// allows it from 'preparing'/'ready' too (not just 'awaitingDriver'), so
+  /// this isn't just a theoretical race — see ORDER_LIFECYCLE.md.
+  void _watchActiveOrder(String orderId, String restaurant) {
+    StreamSubscription<(String?, String?)>? sub;
+    sub = FirestoreOrderService.instance.watchOrderStatus(orderId).listen((event) {
+      final (status, cancelReason) = event;
       // 'assigned' is the vendor's fallback mapping for "ready, driver
       // matched but not yet there" (see firestore_order_service.dart) — the
       // kitchen is done either way, so either status string unlocks pickup.
@@ -547,14 +570,33 @@ class DriverProvider extends ChangeNotifier {
           ));
           notifyListeners();
         }
+        // Keep watching — don't cancel here. The vendor can still cancel
+        // after marking ready, and the driver needs to hear about it too.
+      } else if (status == 'cancelled') {
+        final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+        if (idx != -1) {
+          _activeOrders.removeAt(idx);
+          _selectedOrderId = _activeOrders.isNotEmpty ? _activeOrders.first.id : null;
+          addNotification(DriverNotification(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            title: 'Order Cancelled',
+            body: cancelReason != null
+                ? '$restaurant cancelled this order: $cancelReason'
+                : '$restaurant cancelled this order.',
+            icon: '🚫',
+            time: DateTime.now(),
+          ));
+          notifyListeners();
+        }
         sub?.cancel();
-      } else if (status == null || status == 'cancelled' || status == 'delivered') {
-        // Order resolved some other way (cancelled, or somehow already
-        // past this point) — nothing left to watch for.
+      } else if (status == null || status == 'delivered') {
+        // Doc gone, or the driver's own advanceDeliveryStep() already moved
+        // it to 'delivered' and removed it from _activeOrders — nothing
+        // left to watch for either way.
         sub?.cancel();
       }
     }, onError: (Object e) {
-      debugPrint('[DriverProvider] watchForReady failed: $e');
+      debugPrint('[DriverProvider] watchActiveOrder failed: $e');
       sub?.cancel();
     });
   }
@@ -672,5 +714,41 @@ class DriverProvider extends ChangeNotifier {
     // human double-tap (two separate gesture events, not a true race) can't
     // slip through and double-advance the step.
     Future.delayed(const Duration(milliseconds: 800), () => _advancingOrderIds.remove(orderId));
+  }
+
+  /// A driver can no longer fulfil an order before pickup — gives it up
+  /// instead of leaving the vendor/customer stuck with a silently-stalled
+  /// delivery. Only allowed pre-pickup (toRestaurant/atRestaurant): once the
+  /// driver has the food in hand, abandoning needs a real return-to-restaurant
+  /// flow, not just a status rollback (matches the Firestore rules' own
+  /// scoping for this transition).
+  bool canAbandon(String orderId) {
+    final order = _activeOrders.cast<ActiveOrder?>().firstWhere(
+          (o) => o!.id == orderId,
+          orElse: () => null,
+        );
+    return order != null &&
+        (order.step == DeliveryStep.toRestaurant || order.step == DeliveryStep.atRestaurant);
+  }
+
+  Future<void> abandonDelivery(String orderId, {required String reason}) async {
+    final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+    if (idx == -1 || !canAbandon(orderId)) return;
+    final order = _activeOrders[idx];
+    _activeOrders.removeAt(idx);
+    _selectedOrderId = _activeOrders.isNotEmpty ? _activeOrders.first.id : null;
+    notifyListeners();
+    if (!kUseFirebase) return;
+    try {
+      await FirestoreOrderService.instance.abandonDelivery(orderId, reason: reason);
+    } catch (e) {
+      debugPrint('[Firestore] abandonDelivery failed: $e');
+      errorMessage = 'Could not cancel this delivery — check your connection and try again.';
+      // Put it back locally since the Firestore write didn't land — the
+      // driver still owns it as far as the backend is concerned.
+      _activeOrders.insert(idx.clamp(0, _activeOrders.length), order);
+      _selectedOrderId = order.id;
+      notifyListeners();
+    }
   }
 }

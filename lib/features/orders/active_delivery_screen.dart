@@ -345,9 +345,88 @@ class _ExpandedDetail extends StatelessWidget {
 
           // Primary action — advances to the next delivery step
           _PrimaryActionButton(order: order, driver: driver),
+
+          // Give up the delivery — only offered before pickup, matching the
+          // Firestore rules' own scoping for this transition.
+          if (driver.canAbandon(order.id)) ...[
+            const SizedBox(height: 10),
+            Center(
+              child: TextButton(
+                onPressed: () => _showCancelDeliveryDialog(context, driver, order.id),
+                child: const Text(
+                  'Cancel Delivery',
+                  style: TextStyle(color: AppColors.red, fontWeight: FontWeight.w700, fontSize: 13),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Future<void> _showCancelDeliveryDialog(
+      BuildContext context, DriverProvider driver, String orderId) async {
+    const reasons = [
+      'Vehicle issue',
+      'Personal emergency',
+      'Restaurant took too long',
+      'Other',
+    ];
+    String? selected;
+
+    final reason = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: AppColors.darkSurface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text(
+            'Cancel this delivery?',
+            style: TextStyle(fontWeight: FontWeight.w800, color: AppColors.darkText, fontSize: 17),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'It goes back to the available-orders pool for another driver. '
+                'If nobody else is free, the vendor and customer are notified.',
+                style: TextStyle(fontSize: 13, color: AppColors.darkSubText),
+              ),
+              const SizedBox(height: 14),
+              ...reasons.map(
+                (r) => RadioListTile<String>(
+                  value: r,
+                  groupValue: selected,
+                  onChanged: (v) => setS(() => selected = v),
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: AppColors.red,
+                  title: Text(r, style: const TextStyle(color: AppColors.darkText, fontSize: 14)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Keep Delivery'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.red),
+              onPressed: selected == null ? null : () => Navigator.pop(ctx, selected),
+              child: const Text('Cancel Delivery'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (reason != null) {
+      await driver.abandonDelivery(orderId, reason: reason);
+    }
   }
 }
 

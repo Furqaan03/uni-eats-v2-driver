@@ -20,14 +20,58 @@ class DriverAuthProvider extends ChangeNotifier {
   DriverProfile? _profile;
   bool _initializing = true;
   String? blockedMessage;
+  BankDetails _bankDetails = const BankDetails();
 
   DriverProfile? get profile => _profile;
   bool get isLoggedIn => _profile != null;
   bool get initializing => _initializing;
+  BankDetails get bankDetails => _bankDetails;
+
+  Future<void> _loadBankDetails(String uid) async {
+    try {
+      _bankDetails = await FirestoreOrderService.instance.fetchBankDetails(uid);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[DriverAuth] loadBankDetails failed: $e');
+    }
+  }
+
+  /// Returns null on success, an error message on failure.
+  Future<String?> updateBankDetails(BankDetails details) async {
+    final profile = _profile;
+    if (profile == null) return 'Not signed in.';
+    try {
+      await FirestoreOrderService.instance.updateBankDetails(profile.id, details);
+      _bankDetails = details;
+      notifyListeners();
+      return null;
+    } catch (e) {
+      debugPrint('[DriverAuth] updateBankDetails failed: $e');
+      return 'Could not save bank details — check your connection and try again.';
+    }
+  }
+
+  /// Returns null on success, an error message on failure.
+  Future<String?> updateProfileFields({String? name, String? phone, String? campus}) async {
+    final profile = _profile;
+    if (profile == null) return 'Not signed in.';
+    try {
+      await FirestoreOrderService.instance
+          .updateDriverProfile(profile.id, name: name, phone: phone, campus: campus);
+      _profile = profile.copyWith(name: name, phone: phone, campus: campus);
+      if (name != null) kDriverName = name;
+      notifyListeners();
+      return null;
+    } catch (e) {
+      debugPrint('[DriverAuth] updateProfileFields failed: $e');
+      return 'Could not save — check your connection and try again.';
+    }
+  }
 
   Future<void> _onAuthStateChanged(fb.User? user) async {
     if (user == null) {
       _profile = null;
+      _bankDetails = const BankDetails();
       kDriverId = '';
       kDriverName = 'Driver';
       _initializing = false;
@@ -58,6 +102,7 @@ class DriverAuthProvider extends ChangeNotifier {
       _profile = profile;
       kDriverId = profile.id;
       kDriverName = profile.name;
+      unawaited(_loadBankDetails(profile.id));
     } catch (e) {
       debugPrint('[DriverAuth] profile fetch failed: $e');
     }
@@ -120,6 +165,7 @@ class DriverAuthProvider extends ChangeNotifier {
       _profile = profile;
       kDriverId = profile.id;
       kDriverName = profile.name;
+      unawaited(_loadBankDetails(profile.id));
       notifyListeners();
       return null;
     } on fb.FirebaseAuthException catch (e) {

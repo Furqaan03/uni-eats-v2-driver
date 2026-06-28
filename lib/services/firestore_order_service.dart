@@ -8,6 +8,21 @@ const kUseFirebase = true;
 String kDriverId = '';
 String kDriverName = 'Driver';
 
+// Mirrors the vendor/user apps' own copies of this same capacity check —
+// how many concurrent deliveries one driver can realistically carry, and
+// which order statuses count as "currently using up a driver's capacity".
+const _kMaxOrdersPerDriver = 3;
+const _kInFlightDeliveryStatuses = {'ready', 'assigned', 'pickedUp', 'enRoute'};
+
+/// How long an order can sit unclaimed in the available-orders pool before
+/// any online driver's app flags it as having no available drivers, so the
+/// vendor gets told to call the customer instead of it sitting silently
+/// forever. There's no server-side cron in this project, so this is checked
+/// client-side off the live `streamAvailableOrders()` snapshot every online
+/// driver already receives — whichever driver's app notices first does the
+/// (idempotent) write.
+const kUnclaimedOrderTimeout = Duration(minutes: 5);
+
 /// Flat payout per delivery — confirmed fixed business rule, not derived
 /// from the order's delivery fee or total. Previously this was computed as
 /// `deliveryFee > 0 ? deliveryFee : total * 0.15`, which paid drivers a
@@ -78,6 +93,32 @@ class DriverProfile {
     this.totalTripsAllTime = 0,
     this.isSuspended = false,
   });
+
+  DriverProfile copyWith({String? name, String? phone, String? campus}) => DriverProfile(
+        id: id,
+        name: name ?? this.name,
+        email: email,
+        phone: phone ?? this.phone,
+        studentId: studentId,
+        campus: campus ?? this.campus,
+        rating: rating,
+        acceptanceRate: acceptanceRate,
+        totalEarningsAllTime: totalEarningsAllTime,
+        totalTripsAllTime: totalTripsAllTime,
+        isSuspended: isSuspended,
+      );
+}
+
+/// Payout bank info — kept out of DriverProfile/drivers/{uid} entirely
+/// since that doc is world-readable to any signed-in user; this lives in a
+/// locked-down drivers/{uid}/private/bankDetails subdocument instead.
+class BankDetails {
+  final String cardName;
+  final String iban;
+  final String mobile;
+  const BankDetails({this.cardName = '', this.iban = '', this.mobile = ''});
+
+  bool get isComplete => cardName.isNotEmpty && iban.isNotEmpty && mobile.isNotEmpty;
 }
 
 /// Firestore order data as a plain map the driver provider can use.
@@ -90,6 +131,8 @@ class FirestoreOrder {
   final double total;
   final double deliveryFee;
   final List<Map<String, dynamic>> items;
+  final DateTime? createdAt;
+  final bool noDriversAvailable;
 
   const FirestoreOrder({
     required this.id,
@@ -100,6 +143,8 @@ class FirestoreOrder {
     required this.total,
     required this.deliveryFee,
     required this.items,
+    this.createdAt,
+    this.noDriversAvailable = false,
   });
 
   int get itemCount => items.fold(0, (sum, i) => sum + ((i['qty'] as int?) ?? 1));
@@ -158,6 +203,39 @@ class FirestoreOrderService {
     }, SetOptions(merge: true));
   }
 
+  /// Persist profile-field edits (name/phone/campus) — only the fields
+  /// passed are written.
+  Future<void> updateDriverProfile(String uid, {String? name, String? phone, String? campus}) async {
+    await _driversCol.doc(uid).set({
+      if (name != null) 'name': name,
+      if (phone != null) 'phone': phone,
+      if (campus != null) 'campus': campus,
+    }, SetOptions(merge: true));
+  }
+
+  DocumentReference<Map<String, dynamic>> _bankDetailsDoc(String uid) =>
+      _driversCol.doc(uid).collection('private').doc('bankDetails');
+
+  Future<BankDetails> fetchBankDetails(String uid) async {
+    final snap = await _bankDetailsDoc(uid).get();
+    final data = snap.data();
+    if (data == null) return const BankDetails();
+    return BankDetails(
+      cardName: data['cardName'] as String? ?? '',
+      iban: data['iban'] as String? ?? '',
+      mobile: data['mobile'] as String? ?? '',
+    );
+  }
+
+  Future<void> updateBankDetails(String uid, BankDetails details) async {
+    await _bankDetailsDoc(uid).set({
+      'cardName': details.cardName,
+      'iban': details.iban,
+      'mobile': details.mobile,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
   /// Stream of delivery orders the driver can claim — the vendor has
   /// accepted but the kitchen hasn't started ('awaitingDriver'). Accepting
   /// one is what actually starts the kitchen — the vendor deliberately
@@ -170,6 +248,37 @@ class FirestoreOrderService {
         .orderBy('createdAt')
         .snapshots()
         .map((snap) => snap.docs.map((d) => _fromFirestore(d.data())).toList());
+  }
+
+  /// Flips `noDriversAvailable` for an order that's sat unclaimed past
+  /// [kUnclaimedOrderTimeout] with nobody free to take it — reuses the same
+  /// flag and capacity check `abandonDelivery` already uses when a driver
+  /// gives up an order, just triggered by elapsed time instead of a give-up
+  /// action. The vendor app already has a push notification wired to this
+  /// flag ("No Drivers Available — consider calling the customer"), and the
+  /// customer app already shows a Pick-Up-Myself/Cancel banner off it — both
+  /// built for the driver-abandons-mid-delivery case, reused here as-is.
+  Future<void> flagIfUnclaimedTooLong(FirestoreOrder order) async {
+    // Already flagged — skip entirely, including the capacity check below.
+    // `noDriversAvailableAt` uses serverTimestamp(), which is a genuinely
+    // new value on every write, so re-writing it on every snapshot tick
+    // would re-trigger this same listener for every online driver in a
+    // feedback loop (write -> new snapshot -> re-check -> write again),
+    // forever, for as long as the order sits stale. This check is what
+    // makes the whole thing a one-time flip instead of an unbounded loop.
+    if (order.noDriversAvailable) return;
+
+    final createdAt = order.createdAt;
+    if (createdAt == null) return;
+    if (DateTime.now().difference(createdAt) < kUnclaimedOrderTimeout) return;
+
+    final hasCapacity = await hasDeliveryCapacity();
+    if (hasCapacity) return;
+
+    await _col.doc(order.id).update({
+      'noDriversAvailable': true,
+      'noDriversAvailableAt': FieldValue.serverTimestamp(),
+    });
   }
 
   /// Assign this driver to an order (accept). Uses a transaction so two
@@ -195,14 +304,26 @@ class FirestoreOrderService {
         if (status == 'ready') 'status': 'assigned',
         'driverId': kDriverId,
         'driverName': kDriverName,
+        // Clears a stale flag from flagIfUnclaimedTooLong/abandonDelivery —
+        // without this, an order that sat flagged "no drivers available"
+        // and then got claimed normally (a driver came back online) would
+        // leave the customer's tracking screen stuck showing the "pick up
+        // yourself or cancel" banner forever, since nothing else clears it.
+        'noDriversAvailable': false,
       });
     });
   }
 
-  /// Live status string for a single order — used after accepting to wait
-  /// for the vendor to mark it 'ready' without polling.
-  Stream<String?> watchOrderStatus(String orderId) {
-    return _col.doc(orderId).snapshots().map((snap) => snap.data()?['status'] as String?);
+  /// Live (status, cancelReason) for a single order — watched for the whole
+  /// time a driver has it active, both to wait for the vendor marking it
+  /// 'ready' and to catch the vendor cancelling it out from under the driver
+  /// after it's already been accepted. cancelReason is only ever non-null
+  /// when status is 'cancelled'.
+  Stream<(String?, String?)> watchOrderStatus(String orderId) {
+    return _col.doc(orderId).snapshots().map((snap) {
+      final d = snap.data();
+      return (d?['status'] as String?, d?['cancelReason'] as String?);
+    });
   }
 
   /// Records that a driver declined an offered order, for later analysis —
@@ -230,6 +351,44 @@ class FirestoreOrderService {
   /// ready) never overwrites the vendor's own preparing/ready progress.
   Future<void> markArrivedAtRestaurant(String orderId) async {
     await _col.doc(orderId).update({'driverAtRestaurant': true});
+  }
+
+  /// Driver gives up an order before pickup — puts it back in the
+  /// available-orders pool (status -> 'awaitingDriver', driverId cleared)
+  /// instead of leaving the vendor and customer stuck with an assigned
+  /// driver who's gone quiet. If no other driver is online to pick it up,
+  /// immediately flags noDriversAvailable so the vendor/customer find out
+  /// right away instead of only after some other driver eventually declines.
+  Future<void> abandonDelivery(String orderId, {required String reason}) async {
+    await _col.doc(orderId).update({
+      'status': 'awaitingDriver',
+      'driverId': null,
+      'driverName': null,
+      'driverAtRestaurant': false,
+      'driverCancelReason': reason,
+    });
+
+    final hasReplacement = await hasDeliveryCapacity();
+    if (!hasReplacement) {
+      await _col.doc(orderId).update({
+        'noDriversAvailable': true,
+        'noDriversAvailableAt': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  /// Mirrors the vendor app's own capacity check — true if any online
+  /// driver has a free delivery slot right now.
+  Future<bool> hasDeliveryCapacity() async {
+    final driversSnap = await _driversCol.where('isOnline', isEqualTo: true).get();
+    final onlineDrivers = driversSnap.docs.length;
+    if (onlineDrivers == 0) return false;
+
+    final ordersSnap = await _col.where('orderType', isEqualTo: 'delivery').get();
+    final inFlight = ordersSnap.docs
+        .where((d) => _kInFlightDeliveryStatuses.contains(d.data()['status'] as String?))
+        .length;
+    return (onlineDrivers * _kMaxOrdersPerDriver) - inFlight > 0;
   }
 
   /// Real earnings/trip count for [uid]'s deliveries completed since
@@ -298,6 +457,8 @@ class FirestoreOrderService {
       total: (d['total'] as num?)?.toDouble() ?? 0,
       deliveryFee: (d['deliveryFee'] as num?)?.toDouble() ?? 0,
       items: rawItems.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+      createdAt: (d['createdAt'] as Timestamp?)?.toDate(),
+      noDriversAvailable: d['noDriversAvailable'] as bool? ?? false,
     );
   }
 }
