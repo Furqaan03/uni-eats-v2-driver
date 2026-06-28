@@ -16,11 +16,15 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['status', 'driverId', 'driverName', 'noDriversAvailable']);
 
-      // Driver advancing delivery step (pickedUp → enRoute → delivered, etc.):
+      // Driver advancing delivery step (pickedUp → arrivedAtCustomer → delivered, etc.):
       // Must already be the assigned driver; only status/timestamps/driver-specific flags change.
+      // 'arrivedAtCustomer' must be in the source list so the driver can mark the
+      // order delivered after arriving — omitting it caused a silent PERMISSION_DENIED
+      // on the final 'delivered' write.
       allow update: if request.auth != null
         && resource.data.driverId == request.auth.uid
-        && resource.data.status in ['preparing', 'assigned', 'ready', 'pickedUp', 'enRoute']
+        && resource.data.status in ['preparing', 'assigned', 'ready', 'pickedUp', 'enRoute',
+                                    'arrivedAtCustomer']
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['status', 'deliveredAt', 'driverAtRestaurant']);
 

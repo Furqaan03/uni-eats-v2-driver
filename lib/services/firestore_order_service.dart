@@ -386,14 +386,28 @@ class FirestoreOrderService {
     });
   }
 
-  /// Watches for the incoming order being cancelled by the vendor while the
-  /// driver is still deciding (within the 30-second window). Emits true when
-  /// the order is no longer claimable so the driver card can be auto-dismissed.
-  Stream<bool> watchOrderCancelled(String orderId) {
+  /// Watches for an offered order becoming unavailable while the driver is
+  /// still deciding (within the 30-second window). Emits true when the order
+  /// is no longer claimable so the incoming-order card auto-dismisses.
+  ///
+  /// Triggers on three distinct events:
+  ///   • vendor cancels the order         (status == 'cancelled')
+  ///   • another driver claims it first   (status leaves 'awaitingDriver'/'ready')
+  ///   • order is already delivered       (status == 'delivered')
+  Stream<({bool gone, bool takenByOther})> watchOrderUnavailable(String orderId) {
     return _col.doc(orderId).snapshots().map((snap) {
-      if (!snap.exists) return true;
+      if (!snap.exists) return (gone: true, takenByOther: false);
       final status = snap.data()?['status'] as String?;
-      return status == 'cancelled' || status == 'delivered';
+      if (status == 'cancelled' || status == 'delivered' || status == null) {
+        return (gone: true, takenByOther: false);
+      }
+      // Still claimable states — keep waiting.
+      if (status == 'awaitingDriver' || status == 'ready') {
+        return (gone: false, takenByOther: false);
+      }
+      // Any other status (preparing, assigned, pickedUp, …) means another
+      // driver already claimed it.
+      return (gone: true, takenByOther: true);
     });
   }
 

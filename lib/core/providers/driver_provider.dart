@@ -193,8 +193,8 @@ class DriverProvider extends ChangeNotifier {
   String? _queuedFirestoreOrderId;
   bool get hasQueuedOrder => _queuedFirestoreOrderId != null;
 
-  // Cancellation listener while the driver is deciding on an incoming order.
-  StreamSubscription<bool>? _incomingCancelSub;
+  // Unavailability listener while the driver is deciding on an incoming order.
+  StreamSubscription<({bool gone, bool takenByOther})>? _incomingCancelSub;
 
   // Kitchen-ready timeout per accepted order: if the vendor never marks
   // the order ready within this window, the driver gets a warning notification.
@@ -479,9 +479,9 @@ class DriverProvider extends ChangeNotifier {
     // Watch for the vendor cancelling the order while the driver decides.
     _incomingCancelSub?.cancel();
     _incomingCancelSub = FirestoreOrderService.instance
-        .watchOrderCancelled(order.id)
-        .listen((cancelled) {
-      if (cancelled && _hasIncomingOrder && _incomingFirestoreOrderId == order.id) {
+        .watchOrderUnavailable(order.id)
+        .listen((event) {
+      if (event.gone && _hasIncomingOrder && _incomingFirestoreOrderId == order.id) {
         _hasIncomingOrder = false;
         _incomingFirestoreOrderId = null;
         _firestoreIncoming = null;
@@ -490,9 +490,11 @@ class DriverProvider extends ChangeNotifier {
         _incomingCancelSub = null;
         addNotification(DriverNotification(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
-          title: 'Order Cancelled',
-          body: 'The vendor cancelled the order from ${order.restaurant}.',
-          icon: '❌',
+          title: event.takenByOther ? 'Order Taken' : 'Order Cancelled',
+          body: event.takenByOther
+              ? 'Another driver accepted the order from ${order.restaurant}.'
+              : 'The vendor cancelled the order from ${order.restaurant}.',
+          icon: event.takenByOther ? '🏎️' : '❌',
           time: DateTime.now(),
         ));
         notifyListeners();
