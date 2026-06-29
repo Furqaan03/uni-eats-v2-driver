@@ -107,6 +107,13 @@ class ActiveOrder {
   final int etaMin;
   DeliveryStep step;
   bool pingCustomerSent;
+  // When the driver accepted this order — anchors the ETA/idle watchdog.
+  final DateTime acceptedAt;
+  // One-shot guards so the watchdog/driver only fires each escalation once.
+  bool customerUnreachableSent;
+  bool runningLateFlagged;
+  bool incidentReported;
+  bool idleNudged;
   // True once the vendor marks the kitchen status 'ready'. A driver can
   // mark arrival at the restaurant before this (informational only — see
   // ORDER_LIFECYCLE.md), but can't mark the order picked up until the food
@@ -131,6 +138,11 @@ class ActiveOrder {
     required this.etaMin,
   }) : step = DeliveryStep.toRestaurant,
        pingCustomerSent = false,
+       acceptedAt = DateTime.now(),
+       customerUnreachableSent = false,
+       runningLateFlagged = false,
+       incidentReported = false,
+       idleNudged = false,
        isReady = false;
 
   factory ActiveOrder.fromTemplate(String id, _OrderTemplate t) => ActiveOrder._(
@@ -215,6 +227,18 @@ class DriverProvider extends ChangeNotifier {
   // One status-watcher subscription per active order — keyed by orderId so
   // dispose() and order completion can both cancel precisely without a leak.
   final Map<String, StreamSubscription<(String?, String?)>> _activeOrderSubs = {};
+
+  // ── Watchdog + liveness ─────────────────────────────────────────────────
+  // Grace beyond an order's promised ETA before it's flagged "running late".
+  static const _kLateGraceMin = 10;
+  // How long a driver can sit at toRestaurant after accepting before being
+  // nudged to move or hand the order back so it isn't silently stalled.
+  static const _kIdleClaimTimeout = Duration(minutes: 8);
+  // Single periodic sweep over active orders for late/idle escalation.
+  Timer? _watchdog;
+  // Liveness heartbeat written to the driver's own doc while online.
+  Timer? _heartbeat;
+  static const _kHeartbeatInterval = Duration(minutes: 2);
 
   bool _hasIncomingOrder = false;
   bool get hasIncomingOrder => _hasIncomingOrder;
@@ -367,6 +391,7 @@ class DriverProvider extends ChangeNotifier {
       notifyListeners();
       if (kUseFirebase) {
         _subscribeToAvailableOrders();
+        _startHeartbeat();
         FirestoreOrderService.instance
             .setDriverOnline(true)
             .catchError((e) => debugPrint('[Firestore] setOnline failed: $e'));
@@ -381,6 +406,7 @@ class DriverProvider extends ChangeNotifier {
     } else {
       _availableOrdersSub?.cancel();
       _availableOrdersSub = null;
+      _stopHeartbeat();
       _isReconnecting = false;
       _reconnectAttempt = 0;
       _reconnectGeneration++; // invalidate any pending retry Future.delayed
@@ -561,6 +587,7 @@ class DriverProvider extends ChangeNotifier {
     _isOnline = false;
     _availableOrdersSub?.cancel();
     _availableOrdersSub = null;
+    _stopHeartbeat();
     _isReconnecting = false;
     _reconnectAttempt = 0;
     _reconnectGeneration++;
@@ -584,6 +611,8 @@ class DriverProvider extends ChangeNotifier {
     for (final t in _kitchenTimeouts.values) {
       t.cancel();
     }
+    _watchdog?.cancel();
+    _heartbeat?.cancel();
     super.dispose();
   }
 
@@ -621,6 +650,7 @@ class DriverProvider extends ChangeNotifier {
     _incomingTemplate = null;
     _firestoreIncoming = null;
     notifyListeners();
+    _ensureWatchdog();
     _simulateKitchenReady(order.id, order.restaurant);
     Future.delayed(const Duration(seconds: 10), () {
       if (_isOnline && _activeOrders.length < _kMaxOrders && !_hasIncomingOrder) {
@@ -703,6 +733,7 @@ class DriverProvider extends ChangeNotifier {
     _incomingFirestoreOrderId = null;
     _firestoreIncoming = null;
     notifyListeners();
+    _ensureWatchdog();
     _watchActiveOrder(fsOrderId, order.restaurant);
   }
 
@@ -798,6 +829,137 @@ class DriverProvider extends ChangeNotifier {
     });
 
     _activeOrderSubs[orderId] = sub;
+  }
+
+  /// Starts the once-a-minute sweep that flags running-late and idle orders.
+  /// Idempotent — safe to call on every accept; self-cancels when the active
+  /// list empties (see [_runWatchdog]).
+  void _ensureWatchdog() {
+    _watchdog ??= Timer.periodic(const Duration(seconds: 60), (_) => _runWatchdog());
+  }
+
+  void _runWatchdog() {
+    final now = DateTime.now();
+    var changed = false;
+    for (final order in _activeOrders) {
+      final elapsed = now.difference(order.acceptedAt);
+
+      // Running late: past the promised ETA + grace, and the food is already
+      // picked up (enRoute/atCustomer) so the post-pickup self-transition the
+      // Firestore rules allow covers the flag write.
+      final postPickup =
+          order.step == DeliveryStep.enRoute || order.step == DeliveryStep.atCustomer;
+      if (postPickup &&
+          !order.runningLateFlagged &&
+          elapsed.inMinutes >= order.etaMin + _kLateGraceMin) {
+        order.runningLateFlagged = true;
+        changed = true;
+        addNotification(DriverNotification(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          title: 'Running late ⏱',
+          body: 'This delivery is past its ETA. The customer has been notified — '
+              'get there as soon as you safely can.',
+          icon: '⏱',
+          time: DateTime.now(),
+        ));
+        if (kUseFirebase) {
+          FirestoreOrderService.instance
+              .flagRunningLate(order.id)
+              .catchError((e) => debugPrint('[Firestore] flagRunningLate failed: $e'));
+        }
+      }
+
+      // Idle claim: still heading to the restaurant long after accepting —
+      // nudge the driver to move or hand it back so it isn't silently stalled.
+      if (order.step == DeliveryStep.toRestaurant &&
+          !order.idleNudged &&
+          elapsed >= _kIdleClaimTimeout) {
+        order.idleNudged = true;
+        changed = true;
+        addNotification(DriverNotification(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          title: 'Still heading out?',
+          body: 'You accepted ${order.restaurant} a while ago. Head over now, or '
+              'cancel so another driver can take it.',
+          icon: '🧭',
+          time: DateTime.now(),
+        ));
+      }
+    }
+    if (changed) notifyListeners();
+
+    // Nothing left to watch — stop the sweep until the next accept restarts it.
+    if (_activeOrders.isEmpty) {
+      _watchdog?.cancel();
+      _watchdog = null;
+    }
+  }
+
+  /// Begins the liveness heartbeat (and fires one immediately) while online.
+  void _startHeartbeat() {
+    if (!kUseFirebase) return;
+    FirestoreOrderService.instance
+        .heartbeat()
+        .catchError((e) => debugPrint('[Firestore] heartbeat failed: $e'));
+    _heartbeat ??= Timer.periodic(_kHeartbeatInterval, (_) {
+      FirestoreOrderService.instance
+          .heartbeat()
+          .catchError((e) => debugPrint('[Firestore] heartbeat failed: $e'));
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeat?.cancel();
+    _heartbeat = null;
+  }
+
+  /// Driver can't reach the customer at the drop-off. Raises the
+  /// `customerUnreachable` signal (status untouched) so the vendor/customer
+  /// apps can prompt a response; one-shot per order.
+  Future<void> markCustomerUnreachable(String orderId) async {
+    final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+    if (idx == -1) return;
+    final order = _activeOrders[idx];
+    if (order.customerUnreachableSent) return;
+    order.customerUnreachableSent = true;
+    addNotification(DriverNotification(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: 'Customer notified 📨',
+      body: 'We\'ve told the customer and vendor you\'re waiting. Give it a few '
+          'minutes before deciding what to do next.',
+      icon: '📨',
+      time: DateTime.now(),
+    ));
+    notifyListeners();
+    if (kUseFirebase) {
+      await FirestoreOrderService.instance
+          .flagCustomerUnreachable(orderId, note: 'Driver waiting at drop-off')
+          .catchError((e) => debugPrint('[Firestore] flagCustomerUnreachable failed: $e'));
+    }
+  }
+
+  /// Driver hit a blocking problem AFTER pickup (accident, damaged food,
+  /// safety issue). Raises an incident alert without rolling back status —
+  /// the food is already in hand, so it can't go back to the pool.
+  Future<void> reportIncident(String orderId, {required String reason}) async {
+    final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+    if (idx == -1) return;
+    final order = _activeOrders[idx];
+    order.incidentReported = true;
+    addNotification(DriverNotification(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: 'Issue reported ⚠️',
+      body: 'Support and the vendor have been alerted. Keep the food safe and '
+          'follow up if you can.',
+      icon: '⚠️',
+      time: DateTime.now(),
+    ));
+    notifyListeners();
+    if (kUseFirebase) {
+      await FirestoreOrderService.instance
+          .reportIncident(orderId, reason: reason)
+          .catchError((e) => debugPrint('[Firestore] reportIncident failed: $e'));
+    }
   }
 
   /// Auto-reject: timer expired. Writes rejection metadata to Firestore and

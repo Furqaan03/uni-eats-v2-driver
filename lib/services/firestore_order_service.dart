@@ -576,6 +576,69 @@ class FirestoreOrderService {
     });
   }
 
+  /// Live `isSuspended` flag on a driver's own doc — watched for the whole
+  /// session so an admin suspending a driver mid-shift takes effect
+  /// immediately (force sign-out) instead of only at the next app launch.
+  Stream<bool> watchSuspension(String uid) {
+    return _driversCol
+        .doc(uid)
+        .snapshots()
+        .map((s) => s.data()?['isSuspended'] as bool? ?? false);
+  }
+
+  /// Driver can't reach the customer at the drop-off. Written while status
+  /// stays 'arrivedAtCustomer' — a self-transition the assigned-driver rule
+  /// branch already allows — so the customer/vendor apps can prompt a
+  /// response without the driver having to abandon a delivery they've
+  /// physically completed the run for. Does NOT change `status`.
+  Future<void> flagCustomerUnreachable(String orderId, {String? note}) async {
+    await _col.doc(orderId).update({
+      'customerUnreachable': true,
+      'customerUnreachableAt': FieldValue.serverTimestamp(),
+      if (note != null) 'customerUnreachableNote': note,
+    });
+  }
+
+  /// Clears the unreachable flag once the customer responds.
+  Future<void> clearCustomerUnreachable(String orderId) async {
+    await _col.doc(orderId).update({'customerUnreachable': false});
+  }
+
+  /// Flags that a picked-up delivery has run past its promised ETA so the
+  /// customer app can show a proactive "running late" note. Written at a
+  /// post-pickup status (self-transition), so no rule change is needed.
+  Future<void> flagRunningLate(String orderId) async {
+    await _col.doc(orderId).update({
+      'runningLate': true,
+      'runningLateAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// A blocking incident the driver hit AFTER pickup (accident, damaged food,
+  /// safety issue). The food is already in hand, so unlike abandonDelivery
+  /// this can't return the order to the pool — instead it raises an
+  /// admin/vendor alert flag without rolling back status. Written at a
+  /// post-pickup status (self-transition), so no rule change is needed.
+  Future<void> reportIncident(String orderId, {required String reason}) async {
+    await _col.doc(orderId).update({
+      'driverIncident': true,
+      'driverIncidentReason': reason,
+      'driverIncidentAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Lightweight liveness heartbeat on the driver's own doc so a future
+  /// server/admin reaper (and the vendor app's capacity math) can tell a live
+  /// driver from one whose app died mid-shift. Own-doc merge write that
+  /// leaves isSuspended untouched, satisfying the drivers update rule.
+  Future<void> heartbeat() async {
+    if (kDriverId.isEmpty) return;
+    await _driversCol.doc(kDriverId).set(
+      {'lastActiveAt': FieldValue.serverTimestamp()},
+      SetOptions(merge: true),
+    );
+  }
+
   /// Update delivery step status.
   Future<void> updateDeliveryStatus(String orderId, String status) async {
     await _col.doc(orderId).update({

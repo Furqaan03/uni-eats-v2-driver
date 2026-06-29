@@ -336,11 +336,23 @@ class _ExpandedDetail extends StatelessWidget {
           _ItemsList(order: order),
           const SizedBox(height: 10),
 
-          // Ping
+          // Running-late banner — set by the provider watchdog once a
+          // picked-up order passes its promised ETA.
+          if (order.runningLateFlagged) ...[
+            _LateBanner(),
+            const SizedBox(height: 10),
+          ],
+
+          // Reach-customer controls. En route: a soft "almost there" ping.
+          // Arrived: escalate to "can't reach" if they don't show.
           if (order.step == DeliveryStep.enRoute && !order.pingCustomerSent)
             _PingButton(onTap: () => driver.pingCustomer(order.id)),
           if (order.step == DeliveryStep.enRoute && order.pingCustomerSent)
             _PingSentBadge(),
+          if (order.step == DeliveryStep.atCustomer && !order.customerUnreachableSent)
+            _UnreachableButton(onTap: () => driver.markCustomerUnreachable(order.id)),
+          if (order.step == DeliveryStep.atCustomer && order.customerUnreachableSent)
+            _UnreachableSentBadge(),
           const SizedBox(height: 10),
 
           // Primary action — advances to the next delivery step
@@ -360,9 +372,94 @@ class _ExpandedDetail extends StatelessWidget {
               ),
             ),
           ],
+
+          // After pickup the food is in hand, so it can't go back to the
+          // pool — but the driver still needs a way to raise a blocking
+          // problem (accident, damaged food, safety). Offered only post-pickup
+          // and only once.
+          if (!driver.canAbandon(order.id) &&
+              !order.incidentReported &&
+              (order.step == DeliveryStep.enRoute || order.step == DeliveryStep.atCustomer)) ...[
+            const SizedBox(height: 10),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => _showIncidentDialog(context, driver, order.id),
+                icon: const Icon(Icons.report_problem_outlined, size: 15, color: AppColors.red),
+                label: const Text(
+                  'Report a problem',
+                  style: TextStyle(color: AppColors.red, fontWeight: FontWeight.w700, fontSize: 13),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Future<void> _showIncidentDialog(
+      BuildContext context, DriverProvider driver, String orderId) async {
+    const reasons = [
+      'Accident / vehicle breakdown',
+      'Food damaged or spilled',
+      'Safety concern',
+      'Customer refused the order',
+      'Other',
+    ];
+    String? selected;
+
+    final reason = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: AppColors.darkSurface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text(
+            'Report a problem',
+            style: TextStyle(fontWeight: FontWeight.w800, color: AppColors.darkText, fontSize: 17),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'The order is already picked up, so it can\'t go back to other '
+                'drivers. This alerts support and the vendor right away.',
+                style: TextStyle(fontSize: 13, color: AppColors.darkSubText),
+              ),
+              const SizedBox(height: 14),
+              ...reasons.map(
+                (r) => RadioListTile<String>(
+                  value: r,
+                  groupValue: selected,
+                  onChanged: (v) => setS(() => selected = v),
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: AppColors.red,
+                  title: Text(r, style: const TextStyle(color: AppColors.darkText, fontSize: 14)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Back'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.red),
+              onPressed: selected == null ? null : () => Navigator.pop(ctx, selected),
+              child: const Text('Send alert'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (reason != null) {
+      await driver.reportIncident(orderId, reason: reason);
+    }
   }
 
   Future<void> _showCancelDeliveryDialog(
@@ -993,6 +1090,94 @@ class _PingSentBadge extends StatelessWidget {
           Text(
             'Customer notified ✓',
             style: TextStyle(fontSize: 11, color: AppColors.green, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown at the drop-off when the customer isn't responding — escalates the
+/// wait into a `customerUnreachable` signal the vendor/customer apps react to.
+class _UnreachableButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _UnreachableButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFA940).withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFFA940).withValues(alpha: 0.45)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.phone_missed_outlined, size: 15, color: Color(0xFFFFA940)),
+            SizedBox(width: 7),
+            Text(
+              "Can't reach the customer",
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFFFFA940)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UnreachableSentBadge extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFA940).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFFA940).withValues(alpha: 0.25)),
+      ),
+      child: const Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.hourglass_top_outlined, size: 13, color: Color(0xFFFFA940)),
+          SizedBox(width: 5),
+          Text(
+            'Waiting on customer — vendor alerted',
+            style: TextStyle(fontSize: 11, color: Color(0xFFFFA940), fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Inline banner when a picked-up delivery has run past its promised ETA.
+class _LateBanner extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppColors.red.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.red.withValues(alpha: 0.30)),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.schedule_outlined, size: 16, color: AppColors.red),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Past ETA — the customer has been told you\'re running late.',
+              style: TextStyle(fontSize: 11.5, color: AppColors.red, fontWeight: FontWeight.w600),
+            ),
           ),
         ],
       ),

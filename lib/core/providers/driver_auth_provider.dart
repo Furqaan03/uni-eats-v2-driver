@@ -18,6 +18,7 @@ class DriverAuthProvider extends ChangeNotifier {
   }
 
   StreamSubscription<fb.User?>? _authSub;
+  StreamSubscription<bool>? _suspensionSub;
   DriverProfile? _profile;
   bool _initializing = true;
   String? blockedMessage;
@@ -103,8 +104,27 @@ class DriverAuthProvider extends ChangeNotifier {
     }
   }
 
+  /// Watches the driver's own doc for a mid-session suspension. An admin
+  /// flipping `isSuspended` true takes effect immediately (force sign-out)
+  /// instead of only catching at the next launch via [_onAuthStateChanged].
+  void _watchSuspension(String uid) {
+    _suspensionSub?.cancel();
+    _suspensionSub =
+        FirestoreOrderService.instance.watchSuspension(uid).listen((suspended) async {
+      if (suspended && _profile != null) {
+        blockedMessage =
+            'Your driver account has been suspended. Contact support if you think this is a mistake.';
+        await fb.FirebaseAuth.instance.signOut();
+      }
+    }, onError: (Object e) {
+      debugPrint('[DriverAuth] suspension watch failed: $e');
+    });
+  }
+
   Future<void> _onAuthStateChanged(fb.User? user) async {
     if (user == null) {
+      _suspensionSub?.cancel();
+      _suspensionSub = null;
       _profile = null;
       _bankDetails = const BankDetails();
       kDriverId = '';
@@ -138,6 +158,7 @@ class DriverAuthProvider extends ChangeNotifier {
       kDriverId = profile.id;
       kDriverName = profile.name;
       unawaited(_loadBankDetails(profile.id));
+      _watchSuspension(profile.id);
     } catch (e) {
       debugPrint('[DriverAuth] profile fetch failed: $e');
     }
@@ -274,6 +295,7 @@ class DriverAuthProvider extends ChangeNotifier {
   @override
   void dispose() {
     _authSub?.cancel();
+    _suspensionSub?.cancel();
     super.dispose();
   }
 }
