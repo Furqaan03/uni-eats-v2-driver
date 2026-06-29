@@ -1,4 +1,7 @@
-﻿import 'package:cloud_firestore/cloud_firestore.dart';
+﻿import 'dart:io';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 
 // Set to true after Firebase setup. See PLAN.md.
@@ -71,6 +74,16 @@ class DeliveredTrip {
 }
 
 /// A driver's Firestore profile.
+/// The documents a driver must have on file. Stored as a map on the
+/// drivers/{uid} doc: { 'qid': 'verified', 'studentId': 'pending', ... }.
+/// A missing key means the document hasn't been submitted yet.
+const List<({String key, String label})> kDriverDocuments = [
+  (key: 'qid', label: 'QID'),
+  (key: 'studentId', label: 'Student ID'),
+  (key: 'classSchedule', label: 'Class Schedule'),
+  (key: 'cv', label: 'CV / Resume'),
+];
+
 class DriverProfile {
   final String id;
   final String name;
@@ -78,11 +91,19 @@ class DriverProfile {
   final String phone;
   final String studentId;
   final String campus;
+  final String? photoUrl;
   final double rating;
   final int acceptanceRate;
   final double totalEarningsAllTime;
   final int totalTripsAllTime;
   final bool isSuspended;
+
+  /// Per-document review status keyed by [kDriverDocuments] key.
+  /// Values: 'verified' | 'pending' | 'rejected' (or absent = not submitted).
+  final Map<String, String> documents;
+
+  /// Star → count of ratings received, e.g. { 5: 182, 4: 20, ... }.
+  final Map<int, int> ratingBreakdown;
 
   const DriverProfile({
     required this.id,
@@ -91,25 +112,50 @@ class DriverProfile {
     required this.phone,
     required this.studentId,
     this.campus = 'UDST',
+    this.photoUrl,
     this.rating = 5.0,
     this.acceptanceRate = 100,
     this.totalEarningsAllTime = 0,
     this.totalTripsAllTime = 0,
     this.isSuspended = false,
+    this.documents = const {},
+    this.ratingBreakdown = const {},
   });
 
-  DriverProfile copyWith({String? name, String? phone, String? campus}) => DriverProfile(
+  /// A driver is verified once their identity documents (QID + Student ID)
+  /// are both verified and the account isn't suspended. Drives the avatar
+  /// badge — previously shown unconditionally.
+  bool get isVerified =>
+      !isSuspended &&
+      documents['qid'] == 'verified' &&
+      documents['studentId'] == 'verified';
+
+  /// Total number of ratings counted in [ratingBreakdown].
+  int get totalRatingCount =>
+      ratingBreakdown.values.fold(0, (sum, c) => sum + c);
+
+  DriverProfile copyWith({
+    String? name,
+    String? phone,
+    String? campus,
+    String? photoUrl,
+    Map<String, String>? documents,
+  }) =>
+      DriverProfile(
         id: id,
         name: name ?? this.name,
         email: email,
         phone: phone ?? this.phone,
         studentId: studentId,
         campus: campus ?? this.campus,
+        photoUrl: photoUrl ?? this.photoUrl,
         rating: rating,
         acceptanceRate: acceptanceRate,
         totalEarningsAllTime: totalEarningsAllTime,
         totalTripsAllTime: totalTripsAllTime,
         isSuspended: isSuspended,
+        documents: documents ?? this.documents,
+        ratingBreakdown: ratingBreakdown,
       );
 }
 
@@ -191,12 +237,56 @@ class FirestoreOrderService {
       phone: data['phone'] as String? ?? '',
       studentId: data['studentId'] as String? ?? '',
       campus: data['campus'] as String? ?? 'UDST',
+      photoUrl: (data['photoUrl'] as String?)?.isEmpty ?? true
+          ? null
+          : data['photoUrl'] as String?,
       rating: (data['rating'] as num?)?.toDouble() ?? 5.0,
       acceptanceRate: (data['acceptanceRate'] as num?)?.toInt() ?? 100,
       totalEarningsAllTime: (data['totalEarningsAllTime'] as num?)?.toDouble() ?? 0,
       totalTripsAllTime: (data['totalTripsAllTime'] as num?)?.toInt() ?? 0,
       isSuspended: data['isSuspended'] as bool? ?? false,
+      documents: _parseStringMap(data['documents']),
+      ratingBreakdown: _parseRatingBreakdown(data['ratingBreakdown']),
     );
+  }
+
+  static Map<String, String> _parseStringMap(dynamic raw) {
+    if (raw is! Map) return const {};
+    final out = <String, String>{};
+    raw.forEach((k, v) {
+      if (v is String) out[k.toString()] = v;
+    });
+    return out;
+  }
+
+  static Map<int, int> _parseRatingBreakdown(dynamic raw) {
+    if (raw is! Map) return const {};
+    final out = <int, int>{};
+    raw.forEach((k, v) {
+      final star = int.tryParse(k.toString());
+      final count = (v as num?)?.toInt();
+      if (star != null && count != null) out[star] = count;
+    });
+    return out;
+  }
+
+  /// Uploads a new avatar image to Storage and writes its URL onto the
+  /// driver doc. Returns the public download URL.
+  Future<String> updateProfilePhoto(String uid, File image) async {
+    final ref = FirebaseStorage.instance.ref('driver_avatars/$uid/avatar.jpg');
+    await ref.putFile(image, SettableMetadata(contentType: 'image/jpeg'));
+    final url = await ref.getDownloadURL();
+    await _driversCol.doc(uid).set({'photoUrl': url}, SetOptions(merge: true));
+    return url;
+  }
+
+  /// Uploads a (re)submitted document file and marks it 'pending' review.
+  Future<void> submitDocument(String uid, String docKey, File file) async {
+    final ref = FirebaseStorage.instance.ref('driver_documents/$uid/$docKey.jpg');
+    await ref.putFile(file, SettableMetadata(contentType: 'image/jpeg'));
+    await _driversCol.doc(uid).set({
+      'documents': {docKey: 'pending'},
+    }, SetOptions(merge: true));
   }
 
   Future<void> createDriverProfile(DriverProfile profile) async {

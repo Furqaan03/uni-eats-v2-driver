@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:flutter/foundation.dart';
@@ -65,6 +66,40 @@ class DriverAuthProvider extends ChangeNotifier {
     } catch (e) {
       debugPrint('[DriverAuth] updateProfileFields failed: $e');
       return 'Could not save — check your connection and try again.';
+    }
+  }
+
+  /// Uploads a new profile photo and updates the cached profile.
+  /// Returns null on success, an error message on failure.
+  Future<String?> updateProfilePhoto(File image) async {
+    final profile = _profile;
+    if (profile == null) return 'Not signed in.';
+    try {
+      final url = await FirestoreOrderService.instance.updateProfilePhoto(profile.id, image);
+      _profile = profile.copyWith(photoUrl: url);
+      notifyListeners();
+      return null;
+    } catch (e) {
+      debugPrint('[DriverAuth] updateProfilePhoto failed: $e');
+      return 'Could not upload your photo — check your connection and try again.';
+    }
+  }
+
+  /// Submits/resubmits a document for review and flips it to 'pending'.
+  /// Returns null on success, an error message on failure.
+  Future<String?> submitDocument(String docKey, File file) async {
+    final profile = _profile;
+    if (profile == null) return 'Not signed in.';
+    try {
+      await FirestoreOrderService.instance.submitDocument(profile.id, docKey, file);
+      _profile = profile.copyWith(
+        documents: {...profile.documents, docKey: 'pending'},
+      );
+      notifyListeners();
+      return null;
+    } catch (e) {
+      debugPrint('[DriverAuth] submitDocument failed: $e');
+      return 'Could not upload the document — check your connection and try again.';
     }
   }
 
