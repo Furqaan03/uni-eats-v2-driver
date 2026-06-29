@@ -182,6 +182,17 @@ class DriverProvider extends ChangeNotifier {
   // Firestore order ID for the currently incoming order (null = mock mode)
   String? _incomingFirestoreOrderId;
 
+  // Reconnect state — guards against queuing a SnackBar on every retry
+  // (the real cause of the "stuck Reconnecting banner" on NothingOS/aggressive
+  // battery-optimization devices: onError fires on every retry, each queuing
+  // a new SnackBar, which appear as a permanent bottom bar).
+  bool _isReconnecting = false;
+  int _reconnectAttempt = 0;
+  // Monotonically bumped each time a fresh subscription is started so that
+  // stale Future.delayed retries from a previous subscription can detect
+  // they're outdated and bail without cancelling a good live subscription.
+  int _reconnectGeneration = 0;
+
   // Orders the driver auto-rejected (timer expiry) — cooldown prevents
   // the same order from immediately re-appearing in the stream listener
   // and causing a confusing rapid-fire loop or false "already taken" errors.
@@ -370,6 +381,9 @@ class DriverProvider extends ChangeNotifier {
     } else {
       _availableOrdersSub?.cancel();
       _availableOrdersSub = null;
+      _isReconnecting = false;
+      _reconnectAttempt = 0;
+      _reconnectGeneration++; // invalidate any pending retry Future.delayed
       // An incoming offer the driver hasn't accepted yet must never block
       // going offline — only an order they've actually committed to
       // (in _activeOrders) does that. Declining it on their behalf here
@@ -386,9 +400,20 @@ class DriverProvider extends ChangeNotifier {
 
   void _subscribeToAvailableOrders() {
     _availableOrdersSub?.cancel();
+    // Bump generation so any Future.delayed retry from the previous
+    // subscription knows it's stale and should not fire.
+    final generation = ++_reconnectGeneration;
+
     _availableOrdersSub = FirestoreOrderService.instance
         .streamAvailableOrders()
         .listen((orders) {
+      // First successful snapshot — clear reconnect state so the SnackBar
+      // isn't queued again if there's a future transient error.
+      if (_isReconnecting) {
+        _isReconnecting = false;
+        _reconnectAttempt = 0;
+      }
+
       if (!_isOnline) return;
 
       // Runs regardless of whether *this* driver can take a new order right
@@ -440,15 +465,38 @@ class DriverProvider extends ChangeNotifier {
 
       _presentIncomingOrder(first);
     }, onError: (Object e) {
-      // Most likely cause: the composite index this query needs is still
-      // building. The stream dies on error and won't come back on its
-      // own once the index finishes — so retry instead of leaving the
-      // driver stuck silently offline-feeling while still "online".
+      // Most likely cause on aggressive-battery-optimization devices (e.g.
+      // NothingOS): the OS kills the Firestore gRPC socket hard enough that
+      // the SDK can't reconnect internally and propagates the error here.
+      // On stock Android the SDK usually recovers silently — this path only
+      // fires when it can't (missing composite index, PERMISSION_DENIED, or
+      // hard network kill).
       debugPrint('[DriverProvider] streamAvailableOrders failed: $e');
-      errorMessage = 'Reconnecting to available orders…';
-      notifyListeners();
-      Future.delayed(const Duration(seconds: 5), () {
-        if (_isOnline) _subscribeToAvailableOrders();
+
+      // Only queue the SnackBar on the FIRST failure. Without this guard,
+      // every retry that also fails queues another SnackBar (one every 5s),
+      // causing the ScaffoldMessenger queue to grow unboundedly and showing
+      // a permanent "Reconnecting..." bar — the Nothing Phone 2 bug.
+      if (!_isReconnecting) {
+        _isReconnecting = true;
+        errorMessage = 'Reconnecting to available orders…';
+        notifyListeners();
+      }
+
+      _reconnectAttempt++;
+      // Exponential backoff: 5s → 10s → 20s → 40s → 60s (capped).
+      // Prevents hammering Firestore on a persistent error (missing index,
+      // PERMISSION_DENIED) while still recovering quickly on transient ones.
+      final delaySecs = (5 * (1 << (_reconnectAttempt - 1))).clamp(5, 60);
+      Future.delayed(Duration(seconds: delaySecs), () {
+        // Generation check: if the driver went offline and back online (or
+        // _subscribeToAvailableOrders was called for any other reason) while
+        // this delayed future was pending, a fresh subscription already exists.
+        // Firing here would cancel that good subscription and replace it with
+        // a new one unnecessarily — and would reset _isReconnecting even if
+        // the current subscription is healthy.
+        if (!_isOnline || _reconnectGeneration != generation) return;
+        _subscribeToAvailableOrders();
       });
     });
   }
@@ -513,6 +561,9 @@ class DriverProvider extends ChangeNotifier {
     _isOnline = false;
     _availableOrdersSub?.cancel();
     _availableOrdersSub = null;
+    _isReconnecting = false;
+    _reconnectAttempt = 0;
+    _reconnectGeneration++;
     if (_hasIncomingOrder) declineWithReason('Driver went offline');
     if (kUseFirebase) {
       FirestoreOrderService.instance

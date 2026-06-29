@@ -1,1 +1,25 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"uni-eats-v2-aabf5","appId":"1:894339318990:android:620e0816d505d9034b3c9f","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"uni-eats-v2-aabf5","configurations":{"android":"1:894339318990:android:620e0816d505d9034b3c9f"}}}}}}
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "uni-eats-v2-aabf5",
+          "appId": "1:894339318990:android:620e0816d505d9034b3c9f",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "uni-eats-v2-aabf5",
+          "configurations": {
+            "android": "1:894339318990:android:620e0816d505d9034b3c9f"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,4 +1,5 @@
 ﻿import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 // Set to true after Firebase setup. See PLAN.md.
 const kUseFirebase = true;
@@ -295,9 +296,25 @@ class FirestoreOrderService {
       });
       // Pass the Firestore document ID explicitly — d.data() does NOT contain
       // the document ID, so d.data()['id'] is null if the vendor app didn't
-      // write an 'id' field. That null cast was the root cause of the stream
-      // error → "Reconnecting" loop on the Nothing Phone.
-      return docs.map((d) => _fromFirestore(d.id, d.data())).toList();
+      // write an 'id' field.
+      //
+      // Parse each doc defensively: a throw inside this .map() (e.g. a vendor
+      // app writing `createdAt` or `items` in an unexpected shape) propagates
+      // out of the stream transform and kills the ENTIRE listener — the same
+      // "Reconnecting" loop a PERMISSION_DENIED causes, just triggered by one
+      // bad document instead of a rule. Skip the offending doc and keep the
+      // rest of the pool flowing. (A server-side PERMISSION_DENIED can't be
+      // caught here — it errors the snapshot itself, not an individual map()
+      // call — that's handled by the orders read rule + DriverProvider.onError.)
+      final parsed = <FirestoreOrder>[];
+      for (final d in docs) {
+        try {
+          parsed.add(_fromFirestore(d.id, d.data()));
+        } catch (e) {
+          debugPrint('[FirestoreOrderService] skipping unparseable order ${d.id}: $e');
+        }
+      }
+      return parsed;
     });
   }
 
@@ -490,16 +507,34 @@ class FirestoreOrderService {
 
   /// Mirrors the vendor app's own capacity check — true if any online
   /// driver has a free delivery slot right now.
+  ///
+  /// NOTE: the in-flight count below reads delivery orders assigned to OTHER
+  /// drivers, which the hardened Firestore rules deny (a driver may only read
+  /// the unclaimed pool + their own orders). That read therefore throws under
+  /// the deployed rules. We FAIL SAFE: if we can't compute the global in-flight
+  /// count we assume capacity exists (return true) rather than throwing, so the
+  /// caller never wrongly flags an order "No Drivers Available". Erring the
+  /// other way (false on error) would spam customers with false "no driver"
+  /// banners. A precise global capacity check needs either a server-side
+  /// aggregate (no Cloud Functions in this project) or a rules change to let
+  /// drivers read in-flight delivery orders — deliberately left as a product
+  /// decision rather than silently re-widening order reads.
   Future<bool> hasDeliveryCapacity() async {
     final driversSnap = await _driversCol.where('isOnline', isEqualTo: true).get();
     final onlineDrivers = driversSnap.docs.length;
     if (onlineDrivers == 0) return false;
 
-    final ordersSnap = await _col.where('orderType', isEqualTo: 'delivery').get();
-    final inFlight = ordersSnap.docs
-        .where((d) => _kInFlightDeliveryStatuses.contains(d.data()['status'] as String?))
-        .length;
-    return (onlineDrivers * _kMaxOrdersPerDriver) - inFlight > 0;
+    try {
+      final ordersSnap = await _col.where('orderType', isEqualTo: 'delivery').get();
+      final inFlight = ordersSnap.docs
+          .where((d) => _kInFlightDeliveryStatuses.contains(d.data()['status'] as String?))
+          .length;
+      return (onlineDrivers * _kMaxOrdersPerDriver) - inFlight > 0;
+    } catch (e) {
+      debugPrint('[FirestoreOrderService] hasDeliveryCapacity in-flight read failed '
+          '(assuming capacity available): $e');
+      return true;
+    }
   }
 
   /// Fetches trip history for an arbitrary date range (used by the custom
