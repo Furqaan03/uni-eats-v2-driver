@@ -1,8 +1,9 @@
-﻿import 'dart:io';
+﻿import 'dart:convert';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 // Set to true after Firebase setup. See PLAN.md.
 const kUseFirebase = true;
@@ -270,20 +271,36 @@ class FirestoreOrderService {
     return out;
   }
 
-  /// Uploads a new avatar image to Storage and writes its URL onto the
+  static const _cloudinaryCloud = 'dhsq8isal';
+  static const _cloudinaryPreset = 'unieats';
+
+  Future<String> _uploadToCloudinary(File file, String folder) async {
+    final uri = Uri.parse(
+        'https://api.cloudinary.com/v1_1/$_cloudinaryCloud/image/upload');
+    final request = http.MultipartRequest('POST', uri)
+      ..fields['upload_preset'] = _cloudinaryPreset
+      ..fields['folder'] = folder
+      ..files.add(await http.MultipartFile.fromPath('file', file.path));
+    final response = await request.send();
+    final body = await response.stream.bytesToString();
+    if (response.statusCode != 200) {
+      throw Exception('Cloudinary upload failed (${response.statusCode}): $body');
+    }
+    final json = jsonDecode(body) as Map<String, dynamic>;
+    return json['secure_url'] as String;
+  }
+
+  /// Uploads a new avatar image to Cloudinary and writes its URL onto the
   /// driver doc. Returns the public download URL.
   Future<String> updateProfilePhoto(String uid, File image) async {
-    final ref = FirebaseStorage.instance.ref('driver_avatars/$uid/avatar.jpg');
-    await ref.putFile(image, SettableMetadata(contentType: 'image/jpeg'));
-    final url = await ref.getDownloadURL();
+    final url = await _uploadToCloudinary(image, 'driver_avatars/$uid');
     await _driversCol.doc(uid).set({'photoUrl': url}, SetOptions(merge: true));
     return url;
   }
 
   /// Uploads a (re)submitted document file and marks it 'pending' review.
   Future<void> submitDocument(String uid, String docKey, File file) async {
-    final ref = FirebaseStorage.instance.ref('driver_documents/$uid/$docKey.jpg');
-    await ref.putFile(file, SettableMetadata(contentType: 'image/jpeg'));
+    await _uploadToCloudinary(file, 'driver_documents/$uid');
     await _driversCol.doc(uid).set({
       'documents': {docKey: 'pending'},
     }, SetOptions(merge: true));
@@ -300,6 +317,9 @@ class FirestoreOrderService {
       'acceptanceRate': profile.acceptanceRate,
       'totalEarningsAllTime': profile.totalEarningsAllTime,
       'totalTripsAllTime': profile.totalTripsAllTime,
+      // Persist explicitly so the rules' suspension guard has a value to
+      // compare against on later self-updates (avatar, name, documents).
+      'isSuspended': profile.isSuspended,
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
