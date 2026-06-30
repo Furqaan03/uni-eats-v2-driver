@@ -800,7 +800,17 @@ class FirestoreOrderService {
     await FirebaseFirestore.instance
         .collection('drivers')
         .doc(kDriverId)
-        .set({'isOnline': isOnline, 'name': kDriverName}, SetOptions(merge: true));
+        .set({
+      'isOnline': isOnline,
+      'name': kDriverName,
+      // Stamp the heartbeat in the SAME write that flips isOnline, so an
+      // `isOnline: true` doc can never exist without a fresh `lastActiveAt`.
+      // The customer app treats isOnline=true with a stale/absent heartbeat as
+      // a ghost driver and ignores it; coupling the two writes here closes the
+      // window where the separate _startHeartbeat() write could lag or fail and
+      // leave a genuinely-online driver looking dead.
+      'lastActiveAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   static FirestoreOrder _fromFirestore(String docId, Map<String, dynamic> d) {
