@@ -16,6 +16,10 @@ dependencies:
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
 
+  # Google Maps — mirrors the original driver app (theunieats/app_driver)
+  google_maps_flutter: ^2.12.3
+  geolocator: ^14.0.2
+
   shared_preferences: ^2.3.3
   excel: ^4.0.6
   path_provider: ^2.1.5
@@ -39,3 +43,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icons/
