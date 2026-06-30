@@ -47,7 +47,17 @@ class OrderAlreadyTakenException implements Exception {
 /// Why this order shows as urgent on the driver card.
 enum OrderUrgencyReason { none, rejectedBefore, longWait, both }
 
-/// One real completed delivery, for the Earnings screen's trip history.
+/// How a trip ended, from the driver's point of view.
+///   • delivered — completed normally (the only kind that pays out).
+///   • cancelled — the vendor cancelled it after this driver was assigned.
+///   • abandoned — the driver gave it up before pickup (logged separately,
+///     since clearing driverId on abandon removes the order from read scope).
+enum TripOutcome { delivered, cancelled, abandoned }
+
+/// One trip in the driver's history. Named [DeliveredTrip] for back-compat
+/// (the Earnings screen consumes it), but now also carries non-delivered
+/// outcomes for the History screen. The Earnings queries only ever fetch
+/// `status == 'delivered'`, so they continue to see delivered trips only.
 class DeliveredTrip {
   final String orderNumber;
   final String restaurant;
@@ -56,9 +66,21 @@ class DeliveredTrip {
   final double amount;
   final double orderTotal;
   final int itemCount;
+  final List<Map<String, dynamic>> items;
   final bool isPickup;
   final DateTime placedAt;
+
+  /// When the trip concluded — delivery time for delivered trips, cancel/
+  /// abandon time otherwise. Kept named `deliveredAt` so existing Earnings
+  /// grouping/bucketing keeps working unchanged.
   final DateTime deliveredAt;
+
+  final TripOutcome outcome;
+  final String? cancelReason;
+  final bool customerUnreachable;
+  final bool runningLate;
+  final bool driverIncident;
+  final String? driverIncidentReason;
 
   const DeliveredTrip({
     required this.orderNumber,
@@ -71,9 +93,21 @@ class DeliveredTrip {
     required this.isPickup,
     required this.placedAt,
     required this.deliveredAt,
+    this.items = const [],
+    this.outcome = TripOutcome.delivered,
+    this.cancelReason,
+    this.customerUnreachable = false,
+    this.runningLate = false,
+    this.driverIncident = false,
+    this.driverIncidentReason,
   });
 
   Duration get tripDuration => deliveredAt.difference(placedAt);
+
+  bool get isDelivered => outcome == TripOutcome.delivered;
+  bool get isCancelled => outcome != TripOutcome.delivered;
+  bool get hasIncidentFlags =>
+      customerUnreachable || runningLate || driverIncident;
 }
 
 /// A driver's Firestore profile.
@@ -738,6 +772,17 @@ class FirestoreOrderService {
   /// immediately flags noDriversAvailable so the vendor/customer find out
   /// right away instead of only after some other driver eventually declines.
   Future<void> abandonDelivery(String orderId, {required String reason}) async {
+    // Snapshot the order while we can still read it (driverId == us). The
+    // update below clears driverId and returns the order to the pool, after
+    // which it leaves our read scope entirely — so this is the only chance to
+    // capture it for the driver's own abandoned-trips history.
+    Map<String, dynamic>? snapshot;
+    try {
+      snapshot = (await _col.doc(orderId).get()).data();
+    } catch (e) {
+      debugPrint('[FirestoreOrderService] abandon snapshot read failed: $e');
+    }
+
     await _col.doc(orderId).update({
       'status': 'awaitingDriver',
       'driverId': null,
@@ -752,6 +797,37 @@ class FirestoreOrderService {
         'noDriversAvailable': true,
         'noDriversAvailableAt': FieldValue.serverTimestamp(),
       });
+    }
+
+    // Log the abandoned trip under the driver's own doc so it shows in History.
+    // Fail-soft: a denied write (rules not yet shipped) must never fail the
+    // abandon itself — the order is already safely back in the pool.
+    if (snapshot != null && kDriverId.isNotEmpty) {
+      final items = (snapshot['items'] as List<dynamic>? ?? const [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      try {
+        await _driversCol
+            .doc(kDriverId)
+            .collection('abandonedTrips')
+            .doc(orderId)
+            .set({
+          'orderNumber': snapshot['orderNumber'] ?? '#$orderId',
+          'restaurantName': snapshot['restaurantName'] ?? 'Restaurant',
+          'customerName': snapshot['customerName'] ?? 'Customer',
+          'deliveryAddress': snapshot['deliveryAddress'] ?? 'Campus',
+          'total': snapshot['total'] ?? 0,
+          'items': items,
+          'itemCount':
+              items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
+          'orderType': snapshot['orderType'] ?? 'delivery',
+          'createdAt': snapshot['createdAt'],
+          'reason': reason,
+          'abandonedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('[FirestoreOrderService] abandon log write failed: $e');
+      }
     }
   }
 
@@ -787,9 +863,140 @@ class FirestoreOrderService {
     }
   }
 
+  /// Maps a raw order document to a [DeliveredTrip] with the given [outcome].
+  /// Shared by every history fetch so the field mapping lives in one place.
+  static DeliveredTrip _tripFromOrderDoc(
+    String docId,
+    Map<String, dynamic> d,
+    TripOutcome outcome,
+  ) {
+    final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate();
+    final cancelledAt = (d['cancelledAt'] as Timestamp?)?.toDate();
+    final createdAt = (d['createdAt'] as Timestamp?)?.toDate();
+    // The moment the trip concluded — delivery time when delivered, otherwise
+    // the cancel time (falling back to createdAt, then now).
+    final concludedAt = deliveredAt ?? cancelledAt ?? createdAt ?? DateTime.now();
+    final placedAt = createdAt ?? concludedAt;
+    final items = (d['items'] as List<dynamic>? ?? const [])
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    return DeliveredTrip(
+      orderNumber: d['orderNumber'] as String? ?? '#$docId',
+      restaurant: d['restaurantName'] as String? ?? 'Restaurant',
+      customerName: d['customerName'] as String? ?? 'Customer',
+      dropoff: d['deliveryAddress'] as String? ?? 'Campus',
+      amount: outcome == TripOutcome.delivered ? kDriverPayoutPerDelivery : 0,
+      orderTotal: (d['total'] as num?)?.toDouble() ?? 0,
+      itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
+      items: items,
+      isPickup: (d['orderType'] as String?) == 'pickup',
+      placedAt: placedAt,
+      deliveredAt: concludedAt,
+      outcome: outcome,
+      cancelReason: (d['cancelReason'] as String?) ?? (d['driverCancelReason'] as String?),
+      customerUnreachable: d['customerUnreachable'] as bool? ?? false,
+      runningLate: d['runningLate'] as bool? ?? false,
+      driverIncident: d['driverIncident'] as bool? ?? false,
+      driverIncidentReason: d['driverIncidentReason'] as String?,
+    );
+  }
+
+  /// Maps a `drivers/{uid}/abandonedTrips/{orderId}` log doc (written by
+  /// [abandonDelivery]) to a [DeliveredTrip] with outcome `abandoned`.
+  static DeliveredTrip _tripFromAbandonDoc(String id, Map<String, dynamic> d) {
+    final abandonedAt = (d['abandonedAt'] as Timestamp?)?.toDate() ??
+        (d['createdAt'] as Timestamp?)?.toDate() ??
+        DateTime.now();
+    final createdAt = (d['createdAt'] as Timestamp?)?.toDate() ?? abandonedAt;
+    final items = (d['items'] as List<dynamic>? ?? const [])
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    return DeliveredTrip(
+      orderNumber: d['orderNumber'] as String? ?? '#$id',
+      restaurant: d['restaurantName'] as String? ?? 'Restaurant',
+      customerName: d['customerName'] as String? ?? 'Customer',
+      dropoff: d['deliveryAddress'] as String? ?? 'Campus',
+      amount: 0,
+      orderTotal: (d['total'] as num?)?.toDouble() ?? 0,
+      itemCount: items.isNotEmpty
+          ? items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1))
+          : (d['itemCount'] as num?)?.toInt() ?? 0,
+      items: items,
+      isPickup: (d['orderType'] as String?) == 'pickup',
+      placedAt: createdAt,
+      deliveredAt: abandonedAt,
+      outcome: TripOutcome.abandoned,
+      cancelReason: d['reason'] as String?,
+    );
+  }
+
+  /// Full trip history for the History screen across a date range, covering
+  /// every outcome: delivered, vendor-cancelled, and driver-abandoned.
+  ///
+  /// Delivered/cancelled come from the orders collection (driverId == uid);
+  /// abandoned trips come from the driver's own `abandonedTrips` log, since an
+  /// abandoned order has its driverId cleared and leaves the driver's read
+  /// scope. Each non-delivered source is read defensively so a missing index
+  /// or rule on one never blanks out the whole list.
+  Future<List<DeliveredTrip>> fetchTripRecords(
+    String uid,
+    DateTime start,
+    DateTime end,
+  ) async {
+    final startTs = Timestamp.fromDate(start);
+    final endTs = Timestamp.fromDate(end);
+    final out = <DeliveredTrip>[];
+
+    // Delivered — range-filtered server-side on deliveredAt.
+    final deliveredSnap = await _col
+        .where('driverId', isEqualTo: uid)
+        .where('status', isEqualTo: 'delivered')
+        .where('deliveredAt', isGreaterThanOrEqualTo: startTs)
+        .where('deliveredAt', isLessThanOrEqualTo: endTs)
+        .get();
+    for (final doc in deliveredSnap.docs) {
+      out.add(_tripFromOrderDoc(doc.id, doc.data(), TripOutcome.delivered));
+    }
+
+    // Cancelled — vendor cancelled after assignment (driverId still us).
+    // Date-filtered client-side: cancelled docs may lack a consistently
+    // indexed timestamp, and cancellations are low-volume.
+    try {
+      final cancelledSnap = await _col
+          .where('driverId', isEqualTo: uid)
+          .where('status', isEqualTo: 'cancelled')
+          .get();
+      for (final doc in cancelledSnap.docs) {
+        final t = _tripFromOrderDoc(doc.id, doc.data(), TripOutcome.cancelled);
+        if (!t.deliveredAt.isBefore(start) && !t.deliveredAt.isAfter(end)) {
+          out.add(t);
+        }
+      }
+    } catch (e) {
+      debugPrint('[FirestoreOrderService] cancelled trips read failed: $e');
+    }
+
+    // Abandoned — from the driver's own abandon log.
+    try {
+      final abandonedSnap =
+          await _driversCol.doc(uid).collection('abandonedTrips').get();
+      for (final doc in abandonedSnap.docs) {
+        final t = _tripFromAbandonDoc(doc.id, doc.data());
+        if (!t.deliveredAt.isBefore(start) && !t.deliveredAt.isAfter(end)) {
+          out.add(t);
+        }
+      }
+    } catch (e) {
+      debugPrint('[FirestoreOrderService] abandoned trips read failed: $e');
+    }
+
+    out.sort((a, b) => b.deliveredAt.compareTo(a.deliveredAt));
+    return out;
+  }
+
   /// Fetches trip history for an arbitrary date range (used by the custom
-  /// date picker on the Earnings screen). Mirrors [fetchTripHistory] but
-  /// accepts an explicit [end] bound instead of always reading to now.
+  /// date picker on the Earnings screen). Delivered trips only — Earnings
+  /// counts paid deliveries, so cancelled/abandoned are deliberately excluded.
   Future<List<DeliveredTrip>> fetchTripHistoryForRange(
     String uid,
     DateTime start,
@@ -802,27 +1009,10 @@ class FirestoreOrderService {
         .where('deliveredAt', isLessThanOrEqualTo: Timestamp.fromDate(end))
         .get();
 
-    final trips = snap.docs.map((doc) {
-      final d = doc.data();
-      final total = (d['total'] as num?)?.toDouble() ?? 0;
-      final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate() ?? DateTime.now();
-      final placedAt = (d['createdAt'] as Timestamp?)?.toDate() ?? deliveredAt;
-      final items = d['items'] as List<dynamic>? ?? const [];
-      return DeliveredTrip(
-        orderNumber: d['orderNumber'] as String? ?? '#${doc.id}',
-        restaurant: d['restaurantName'] as String? ?? 'Restaurant',
-        customerName: d['customerName'] as String? ?? 'Customer',
-        dropoff: d['deliveryAddress'] as String? ?? 'Campus',
-        amount: kDriverPayoutPerDelivery,
-        orderTotal: total,
-        itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
-        isPickup: (d['orderType'] as String?) == 'pickup',
-        placedAt: placedAt,
-        deliveredAt: deliveredAt,
-      );
-    }).toList()
+    return snap.docs
+        .map((doc) => _tripFromOrderDoc(doc.id, doc.data(), TripOutcome.delivered))
+        .toList()
       ..sort((a, b) => b.deliveredAt.compareTo(a.deliveredAt));
-    return trips;
   }
 
   /// Real earnings/trip count for [uid]'s deliveries completed since
@@ -849,27 +1039,10 @@ class FirestoreOrderService {
         .where('deliveredAt', isGreaterThanOrEqualTo: Timestamp.fromDate(since))
         .get();
 
-    final trips = snap.docs.map((doc) {
-      final d = doc.data();
-      final total = (d['total'] as num?)?.toDouble() ?? 0;
-      final deliveredAt = (d['deliveredAt'] as Timestamp?)?.toDate() ?? DateTime.now();
-      final placedAt = (d['createdAt'] as Timestamp?)?.toDate() ?? deliveredAt;
-      final items = d['items'] as List<dynamic>? ?? const [];
-      return DeliveredTrip(
-        orderNumber: d['orderNumber'] as String? ?? '#${doc.id}',
-        restaurant: d['restaurantName'] as String? ?? 'Restaurant',
-        customerName: d['customerName'] as String? ?? 'Customer',
-        dropoff: d['deliveryAddress'] as String? ?? 'Campus',
-        amount: kDriverPayoutPerDelivery,
-        orderTotal: total,
-        itemCount: items.fold<int>(0, (sum, i) => sum + ((i['qty'] as num?)?.toInt() ?? 1)),
-        isPickup: (d['orderType'] as String?) == 'pickup',
-        placedAt: placedAt,
-        deliveredAt: deliveredAt,
-      );
-    }).toList()
+    return snap.docs
+        .map((doc) => _tripFromOrderDoc(doc.id, doc.data(), TripOutcome.delivered))
+        .toList()
       ..sort((a, b) => b.deliveredAt.compareTo(a.deliveredAt));
-    return trips;
   }
 
   /// Update the driver's online status in /drivers collection.

@@ -1,6 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import '../../core/theme/app_colors.dart';
 import '../../services/firestore_order_service.dart';
+import '../earnings/widgets/date_range_sheet.dart';
+
+/// Date-range presets for the history list. Custom opens the shared
+/// [showDateRangeSheet] picker.
+enum _RangePreset { today, week, month, custom }
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -11,16 +19,21 @@ class HistoryScreen extends StatefulWidget {
 
 class _HistoryScreenState extends State<HistoryScreen> {
   final _searchCtrl = TextEditingController();
-  int _activeFilter = 0;
-  late Future<List<DeliveredTrip>> _tripsFuture;
 
-  static const _filters = ['All', 'Delivery', 'Pickup', 'This Week'];
+  /// 0 = All, 1 = Completed, 2 = Cancelled. Outcome axis only — date range and
+  /// search are separate, orthogonal controls.
+  int _outcomeFilter = 0;
+  static const _outcomes = ['All', 'Completed', 'Cancelled'];
+
+  _RangePreset _preset = _RangePreset.month;
+  DateTimeRange? _customRange;
+
+  late Future<List<DeliveredTrip>> _tripsFuture;
 
   @override
   void initState() {
     super.initState();
-    _tripsFuture = FirestoreOrderService.instance
-        .fetchTripHistory(kDriverId, DateTime.now().subtract(const Duration(days: 30)));
+    _tripsFuture = _fetch();
     _searchCtrl.addListener(() => setState(() {}));
   }
 
@@ -30,12 +43,83 @@ class _HistoryScreenState extends State<HistoryScreen> {
     super.dispose();
   }
 
+  /// Resolves the active preset to a concrete [DateTimeRange], snapped to whole
+  /// days so the Firestore bounds are inclusive of the edge dates.
+  DateTimeRange get _range {
+    final now = DateTime.now();
+    final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59);
+    switch (_preset) {
+      case _RangePreset.today:
+        return DateTimeRange(
+            start: DateTime(now.year, now.month, now.day), end: endOfToday);
+      case _RangePreset.week:
+        return DateTimeRange(
+            start: DateTime(now.year, now.month, now.day)
+                .subtract(const Duration(days: 6)),
+            end: endOfToday);
+      case _RangePreset.month:
+        return DateTimeRange(
+            start: DateTime(now.year, now.month, 1), end: endOfToday);
+      case _RangePreset.custom:
+        final r = _customRange;
+        if (r == null) {
+          return DateTimeRange(
+              start: DateTime(now.year, now.month, 1), end: endOfToday);
+        }
+        return DateTimeRange(
+          start: DateTime(r.start.year, r.start.month, r.start.day),
+          end: DateTime(r.end.year, r.end.month, r.end.day, 23, 59, 59),
+        );
+    }
+  }
+
+  Future<List<DeliveredTrip>> _fetch() {
+    final r = _range;
+    return FirestoreOrderService.instance.fetchTripRecords(kDriverId, r.start, r.end);
+  }
+
+  void _reload() => setState(() => _tripsFuture = _fetch());
+
   Future<void> _refresh() async {
-    setState(() {
-      _tripsFuture = FirestoreOrderService.instance
-          .fetchTripHistory(kDriverId, DateTime.now().subtract(const Duration(days: 30)));
-    });
+    _reload();
     await _tripsFuture;
+  }
+
+  Future<void> _selectPreset(_RangePreset p) async {
+    if (p == _RangePreset.custom) {
+      final picked = await showDateRangeSheet(context, initialRange: _customRange);
+      if (picked == null || !mounted) return;
+      setState(() {
+        _customRange = picked;
+        _preset = _RangePreset.custom;
+      });
+    } else {
+      setState(() => _preset = p);
+    }
+    _reload();
+  }
+
+  String _rangeLabel(_RangePreset p) {
+    switch (p) {
+      case _RangePreset.today:
+        return 'Today';
+      case _RangePreset.week:
+        return 'This Week';
+      case _RangePreset.month:
+        return 'This Month';
+      case _RangePreset.custom:
+        final r = _customRange;
+        if (r == null) return 'Custom';
+        return '${_shortDate(r.start)} – ${_shortDate(r.end)}';
+    }
+  }
+
+  static String _shortDate(DateTime d) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${months[d.month - 1]} ${d.day}';
   }
 
   String _dayLabel(DateTime d) {
@@ -59,17 +143,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
       result = result
           .where((t) =>
               t.restaurant.toLowerCase().contains(query) ||
-              t.dropoff.toLowerCase().contains(query))
+              t.dropoff.toLowerCase().contains(query) ||
+              t.orderNumber.toLowerCase().contains(query))
           .toList();
     }
-    switch (_activeFilter) {
-      case 1:
-        result = result.where((t) => !t.isPickup).toList();
-      case 2:
-        result = result.where((t) => t.isPickup).toList();
-      case 3:
-        final weekAgo = DateTime.now().subtract(const Duration(days: 7));
-        result = result.where((t) => t.deliveredAt.isAfter(weekAgo)).toList();
+    switch (_outcomeFilter) {
+      case 1: // Completed
+        result = result.where((t) => t.isDelivered).toList();
+      case 2: // Cancelled (vendor-cancelled + driver-abandoned)
+        result = result.where((t) => t.isCancelled).toList();
     }
     return result;
   }
@@ -90,8 +172,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final textColor = isDark ? AppColors.darkText : AppColors.lightText;
     final subText = isDark ? AppColors.darkSubText : AppColors.lightSubText;
     // AppColors.orange is a near-black brand color — fine as an accent on
-    // light backgrounds, but invisible against dark ones (same issue fixed
-    // on the Earnings screen). Use a genuinely visible accent in dark mode.
+    // light backgrounds, but invisible against dark ones. Use a visible accent.
     final accent = isDark ? AppColors.yellow : AppColors.orange;
 
     return Scaffold(
@@ -142,18 +223,42 @@ class _HistoryScreenState extends State<HistoryScreen> {
               ),
             ),
             const SizedBox(height: 14),
-            // Filter chips
+            // Date-range presets (time axis)
+            SizedBox(
+              height: 34,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                children: [
+                  for (final p in _RangePreset.values) ...[
+                    _RangeChip(
+                      label: _rangeLabel(p),
+                      icon: p == _RangePreset.custom ? Icons.calendar_today_rounded : null,
+                      active: _preset == p,
+                      isDark: isDark,
+                      accent: accent,
+                      cardBg: cardBg,
+                      subText: subText,
+                      onTap: () => _selectPreset(p),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            // Outcome tabs (status axis)
             SizedBox(
               height: 36,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 24),
-                itemCount: _filters.length,
+                itemCount: _outcomes.length,
                 separatorBuilder: (_, __) => const SizedBox(width: 8),
                 itemBuilder: (_, i) {
-                  final active = _activeFilter == i;
+                  final active = _outcomeFilter == i;
                   return GestureDetector(
-                    onTap: () => setState(() => _activeFilter = i),
+                    onTap: () => setState(() => _outcomeFilter = i),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -169,7 +274,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         ),
                       ),
                       child: Text(
-                        _filters[i],
+                        _outcomes[i],
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
@@ -195,34 +300,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
                     }
                     if (snapshot.hasError) {
-                      return ListView(
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 40),
-                            child: Center(
-                              child: Text('Could not load trip history.',
-                                  style: TextStyle(fontSize: 13, color: subText)),
-                            ),
-                          ),
-                        ],
+                      return _EmptyState(
+                        message: 'Could not load trip history.',
+                        subText: subText,
                       );
                     }
                     final filtered = _applyFilters(snapshot.data ?? const []);
                     if (filtered.isEmpty) {
-                      return ListView(
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 40),
-                            child: Center(
-                              child: Text(
-                                _searchCtrl.text.isNotEmpty
-                                    ? 'No trips match "${_searchCtrl.text}".'
-                                    : 'No trips in this period yet.',
-                                style: TextStyle(fontSize: 13, color: subText),
-                              ),
-                            ),
-                          ),
-                        ],
+                      return _EmptyState(
+                        message: _searchCtrl.text.isNotEmpty
+                            ? 'No trips match "${_searchCtrl.text}".'
+                            : 'No trips in this period yet.',
+                        subText: subText,
                       );
                     }
                     final groups = _groupByDay(filtered);
@@ -272,6 +361,94 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 }
 
+/// Colors + label for a trip outcome badge.
+({Color color, String label}) _outcomeStyle(DeliveredTrip t) {
+  switch (t.outcome) {
+    case TripOutcome.delivered:
+      return (color: AppColors.green, label: 'Delivered');
+    case TripOutcome.cancelled:
+      return (color: AppColors.red, label: 'Cancelled');
+    case TripOutcome.abandoned:
+      return (color: AppColors.yellow, label: 'Abandoned');
+  }
+}
+
+class _RangeChip extends StatelessWidget {
+  final String label;
+  final IconData? icon;
+  final bool active;
+  final bool isDark;
+  final Color accent;
+  final Color cardBg;
+  final Color subText;
+  final VoidCallback onTap;
+  const _RangeChip({
+    required this.label,
+    this.icon,
+    required this.active,
+    required this.isDark,
+    required this.accent,
+    required this.cardBg,
+    required this.subText,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = active ? (isDark ? AppColors.darkBg : Colors.white) : subText;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? accent : cardBg,
+          borderRadius: BorderRadius.circular(50),
+          border: Border.all(
+            color: active
+                ? accent
+                : isDark
+                    ? AppColors.darkBorder
+                    : AppColors.lightBorder,
+          ),
+        ),
+        child: Row(
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 13, color: fg),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              label,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: fg),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  final String message;
+  final Color subText;
+  const _EmptyState({required this.message, required this.subText});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 40),
+          child: Center(
+            child: Text(message, style: TextStyle(fontSize: 13, color: subText)),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _TripCard extends StatelessWidget {
   final DeliveredTrip trip;
   final bool isDark;
@@ -284,110 +461,17 @@ class _TripCard extends StatelessWidget {
     required this.accent,
   });
 
-  String get _timeLabel {
-    final t = trip.deliveredAt;
-    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
-    final m = t.minute.toString().padLeft(2, '0');
-    final period = t.hour < 12 ? 'AM' : 'PM';
-    return '$h:$m $period';
-  }
-
-  String get _durationLabel {
-    final mins = trip.tripDuration.inMinutes;
-    if (mins < 1) return '<1 min';
-    if (mins < 60) return '$mins min';
-    return '${mins ~/ 60}h ${mins % 60}m';
-  }
+  String get _timeLabel => _formatTime(trip.deliveredAt);
 
   void _showDetail(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: isDark ? AppColors.darkSurface : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        trip.restaurant,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          color: isDark ? AppColors.darkText : AppColors.lightText,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        trip.orderNumber,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: isDark ? AppColors.darkSubText : AppColors.lightSubText,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: AppColors.green.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text(
-                    'Delivered',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.green,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            _DetailRow(label: 'Customer', value: trip.customerName, isDark: isDark),
-            const SizedBox(height: 10),
-            _DetailRow(label: 'Dropoff', value: trip.dropoff, isDark: isDark),
-            const SizedBox(height: 10),
-            _DetailRow(
-              label: 'Order type',
-              value: trip.isPickup ? 'Pickup' : 'Delivery',
-              isDark: isDark,
-            ),
-            const SizedBox(height: 10),
-            _DetailRow(
-              label: 'Items',
-              value: '${trip.itemCount} item${trip.itemCount == 1 ? '' : 's'}',
-              isDark: isDark,
-            ),
-            const SizedBox(height: 10),
-            _DetailRow(label: 'Trip duration', value: _durationLabel, isDark: isDark),
-            const SizedBox(height: 10),
-            _DetailRow(
-              label: 'Delivered at',
-              value: _timeLabel,
-              isDark: isDark,
-            ),
-            const Divider(height: 24),
-            _DetailRow(
-              label: 'Your earnings',
-              value: 'QAR ${trip.amount.toStringAsFixed(2)}',
-              isDark: isDark,
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => _TripDetailSheet(trip: trip, isDark: isDark),
     );
   }
 
@@ -395,6 +479,8 @@ class _TripCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final dividerColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
     final subTextColor = isDark ? AppColors.darkSubText : AppColors.lightSubText;
+    final style = _outcomeStyle(trip);
+    final startDot = trip.isDelivered ? accent : style.color;
     return GestureDetector(
       onTap: () => _showDetail(context),
       child: Container(
@@ -413,13 +499,13 @@ class _TripCard extends StatelessWidget {
                 Container(
                   width: 8,
                   height: 8,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: accent),
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: startDot),
                 ),
                 Container(width: 1, height: 20, color: dividerColor),
                 Container(
                   width: 8,
                   height: 8,
-                  decoration: const BoxDecoration(shape: BoxShape.circle, color: AppColors.green),
+                  decoration: BoxDecoration(shape: BoxShape.circle, color: style.color),
                 ),
               ],
             ),
@@ -428,33 +514,14 @@ class _TripCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          trip.restaurant,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: isDark ? AppColors.darkText : AppColors.lightText,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: subTextColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(5),
-                        ),
-                        child: Text(
-                          trip.isPickup ? 'Pickup' : 'Delivery',
-                          style: TextStyle(
-                              fontSize: 9, fontWeight: FontWeight.w700, color: subTextColor),
-                        ),
-                      ),
-                    ],
+                  Text(
+                    trip.restaurant,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: isDark ? AppColors.darkText : AppColors.lightText,
+                    ),
                   ),
                   const SizedBox(height: 6),
                   Text(
@@ -465,15 +532,16 @@ class _TripCard extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(width: 8),
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Text(
-                  'QAR ${trip.amount.toStringAsFixed(2)}',
-                  style: const TextStyle(
+                  trip.isDelivered ? 'QAR ${trip.amount.toStringAsFixed(2)}' : '—',
+                  style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w800,
-                    color: AppColors.green,
+                    color: trip.isDelivered ? AppColors.green : subTextColor,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -484,15 +552,15 @@ class _TripCard extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: AppColors.green.withValues(alpha: 0.12),
+                        color: style.color.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(4),
                       ),
-                      child: const Text(
-                        'Done',
+                      child: Text(
+                        style.label,
                         style: TextStyle(
                           fontSize: 9,
                           fontWeight: FontWeight.w700,
-                          color: AppColors.green,
+                          color: style.color,
                         ),
                       ),
                     ),
@@ -509,11 +577,396 @@ class _TripCard extends StatelessWidget {
   }
 }
 
+class _TripDetailSheet extends StatelessWidget {
+  final DeliveredTrip trip;
+  final bool isDark;
+  const _TripDetailSheet({required this.trip, required this.isDark});
+
+  static const _supportEmail = 'support@unieats.qa';
+
+  Color get _text => isDark ? AppColors.darkText : AppColors.lightText;
+  Color get _sub => isDark ? AppColors.darkSubText : AppColors.lightSubText;
+
+  String get _durationLabel {
+    final mins = trip.tripDuration.inMinutes;
+    if (mins < 1) return '<1 min';
+    if (mins < 60) return '$mins min';
+    return '${mins ~/ 60}h ${mins % 60}m';
+  }
+
+  Future<void> _copyOrderNumber(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: trip.orderNumber));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Copied ${trip.orderNumber}'), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  Future<void> _reportIssue(BuildContext context) async {
+    final uri = Uri(
+      scheme: 'mailto',
+      path: _supportEmail,
+      queryParameters: {
+        'subject': 'Trip issue — ${trip.orderNumber}',
+        'body': 'Order: ${trip.orderNumber}\n'
+            'Restaurant: ${trip.restaurant}\n'
+            'Dropoff: ${trip.dropoff}\n'
+            'Date: ${_formatDateTime(trip.deliveredAt)}\n\n'
+            'Describe the issue:\n',
+      },
+    );
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!context.mounted) return;
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No email app found. Reach us at $_supportEmail')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = _outcomeStyle(trip);
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 28),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 18),
+                decoration: BoxDecoration(
+                  color: _sub.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            // Header
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        trip.restaurant,
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: _text),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(trip.orderNumber, style: TextStyle(fontSize: 12, color: _sub)),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: style.color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    style.label,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: style.color),
+                  ),
+                ),
+              ],
+            ),
+            // Cancellation reason banner
+            if (trip.isCancelled && (trip.cancelReason?.isNotEmpty ?? false)) ...[
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: style.color.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  trip.outcome == TripOutcome.abandoned
+                      ? 'You gave up this order: ${trip.cancelReason}'
+                      : 'Cancelled: ${trip.cancelReason}',
+                  style: TextStyle(fontSize: 12, color: _text, height: 1.3),
+                ),
+              ),
+            ],
+            // Incident flags
+            if (trip.hasIncidentFlags) ...[
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (trip.customerUnreachable)
+                    _FlagChip(label: 'Customer unreachable', color: AppColors.red),
+                  if (trip.runningLate)
+                    _FlagChip(label: 'Ran late', color: AppColors.yellow),
+                  if (trip.driverIncident)
+                    _FlagChip(
+                      label: trip.driverIncidentReason?.isNotEmpty ?? false
+                          ? 'Incident: ${trip.driverIncidentReason}'
+                          : 'Incident reported',
+                      color: AppColors.red,
+                    ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 18),
+            // Route
+            _SectionLabel('Route', color: _sub),
+            const SizedBox(height: 10),
+            _RouteBlock(
+              pickup: trip.restaurant,
+              dropoff: trip.dropoff,
+              isDark: isDark,
+            ),
+            const SizedBox(height: 18),
+            // Items
+            if (trip.items.isNotEmpty) ...[
+              _SectionLabel(
+                'Items (${trip.itemCount})',
+                color: _sub,
+              ),
+              const SizedBox(height: 8),
+              ...trip.items.map((i) => _ItemRow(item: i, isDark: isDark)),
+              const SizedBox(height: 18),
+            ],
+            // Timeline
+            _SectionLabel('Timeline', color: _sub),
+            const SizedBox(height: 10),
+            _DetailRow(label: 'Placed at', value: _formatDateTime(trip.placedAt), isDark: isDark),
+            const SizedBox(height: 10),
+            _DetailRow(
+              label: '${style.label} at',
+              value: _formatDateTime(trip.deliveredAt),
+              isDark: isDark,
+            ),
+            if (trip.isDelivered) ...[
+              const SizedBox(height: 10),
+              _DetailRow(label: 'Trip duration', value: _durationLabel, isDark: isDark),
+            ],
+            const SizedBox(height: 18),
+            // Customer
+            _SectionLabel('Customer', color: _sub),
+            const SizedBox(height: 10),
+            _DetailRow(label: 'Name', value: trip.customerName, isDark: isDark),
+            const Divider(height: 28),
+            // Money
+            _DetailRow(
+              label: 'Order value',
+              value: 'QAR ${trip.orderTotal.toStringAsFixed(2)}',
+              isDark: isDark,
+            ),
+            const SizedBox(height: 10),
+            _DetailRow(
+              label: 'Your payout',
+              value: trip.isDelivered
+                  ? 'QAR ${trip.amount.toStringAsFixed(2)}'
+                  : 'No payout',
+              isDark: isDark,
+              valueColor: trip.isDelivered ? AppColors.green : _sub,
+            ),
+            const SizedBox(height: 20),
+            // Actions
+            Row(
+              children: [
+                Expanded(
+                  child: _ActionButton(
+                    icon: Icons.copy_rounded,
+                    label: 'Copy order #',
+                    isDark: isDark,
+                    onTap: () => _copyOrderNumber(context),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ActionButton(
+                    icon: Icons.support_agent_rounded,
+                    label: 'Report an issue',
+                    isDark: isDark,
+                    onTap: () => _reportIssue(context),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _SectionLabel(this.text, {required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text.toUpperCase(),
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w800,
+        color: color,
+        letterSpacing: 0.5,
+      ),
+    );
+  }
+}
+
+class _RouteBlock extends StatelessWidget {
+  final String pickup;
+  final String dropoff;
+  final bool isDark;
+  const _RouteBlock({required this.pickup, required this.dropoff, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    final text = isDark ? AppColors.darkText : AppColors.lightText;
+    final sub = isDark ? AppColors.darkSubText : AppColors.lightSubText;
+    final divider = isDark ? AppColors.darkBorder : AppColors.lightBorder;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Column(
+          children: [
+            const Icon(Icons.storefront_rounded, size: 16, color: AppColors.green),
+            Container(width: 1, height: 22, color: divider),
+            Icon(Icons.location_on_rounded, size: 16, color: AppColors.red),
+          ],
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Pickup', style: TextStyle(fontSize: 10, color: sub)),
+              const SizedBox(height: 1),
+              Text(pickup, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: text)),
+              const SizedBox(height: 14),
+              Text('Dropoff', style: TextStyle(fontSize: 10, color: sub)),
+              const SizedBox(height: 1),
+              Text(dropoff, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: text)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ItemRow extends StatelessWidget {
+  final Map<String, dynamic> item;
+  final bool isDark;
+  const _ItemRow({required this.item, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    final text = isDark ? AppColors.darkText : AppColors.lightText;
+    final sub = isDark ? AppColors.darkSubText : AppColors.lightSubText;
+    final qty = (item['qty'] as num?)?.toInt() ?? 1;
+    final name = item['name']?.toString() ?? 'Item';
+    final price = (item['price'] as num?)?.toDouble();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Text('$qty×', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: sub)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: text)),
+          ),
+          if (price != null)
+            Text('QAR ${price.toStringAsFixed(2)}',
+                style: TextStyle(fontSize: 12, color: sub)),
+        ],
+      ),
+    );
+  }
+}
+
+class _FlagChip extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _FlagChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 13, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: color),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isDark;
+  final VoidCallback onTap;
+  const _ActionButton({
+    required this.icon,
+    required this.label,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final border = isDark ? AppColors.darkBorder : AppColors.lightBorder;
+    final text = isDark ? AppColors.darkText : AppColors.lightText;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: border),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 16, color: text),
+            const SizedBox(width: 8),
+            Text(label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: text)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DetailRow extends StatelessWidget {
   final String label;
   final String value;
   final bool isDark;
-  const _DetailRow({required this.label, required this.value, required this.isDark});
+  final Color? valueColor;
+  const _DetailRow({
+    required this.label,
+    required this.value,
+    required this.isDark,
+    this.valueColor,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -534,11 +987,26 @@ class _DetailRow extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w800,
-              color: isDark ? AppColors.darkText : AppColors.lightText,
+              color: valueColor ?? (isDark ? AppColors.darkText : AppColors.lightText),
             ),
           ),
         ),
       ],
     );
   }
+}
+
+String _formatTime(DateTime t) {
+  final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
+  final m = t.minute.toString().padLeft(2, '0');
+  final period = t.hour < 12 ? 'AM' : 'PM';
+  return '$h:$m $period';
+}
+
+String _formatDateTime(DateTime d) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  return '${months[d.month - 1]} ${d.day}, ${_formatTime(d)}';
 }
