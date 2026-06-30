@@ -52,3 +52,6 @@ macos/Runner/GoogleService-Info.plist
 *.keystore
 *.jks
 .env
+
+# Firebase service-account key — secret, never commit (bundled locally for FCM v1 push)
+assets/push/service_account.json

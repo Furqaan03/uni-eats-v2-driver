@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../services/firestore_order_service.dart';
+import '../../services/push/notification_service.dart';
 
 enum DeliveryStep { toRestaurant, atRestaurant, enRoute, atCustomer, delivered }
 
@@ -185,7 +186,11 @@ class DriverNotification {
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
-class DriverProvider extends ChangeNotifier {
+class DriverProvider extends ChangeNotifier with WidgetsBindingObserver {
+  DriverProvider() {
+    WidgetsBinding.instance.addObserver(this);
+  }
+
   bool _isOnline = false;
   bool get isOnline => _isOnline;
 
@@ -236,9 +241,12 @@ class DriverProvider extends ChangeNotifier {
   static const _kIdleClaimTimeout = Duration(minutes: 8);
   // Single periodic sweep over active orders for late/idle escalation.
   Timer? _watchdog;
-  // Liveness heartbeat written to the driver's own doc while online.
+  // Liveness heartbeat written to the driver's own doc while online. Kept
+  // short (30s) so the customer app can detect a driver who vanished without
+  // tapping "offline" (app killed / lost signal) within ~90s and disable
+  // Delivery — see _kDriverStaleAfter in the customer/vendor apps.
   Timer? _heartbeat;
-  static const _kHeartbeatInterval = Duration(minutes: 2);
+  static const _kHeartbeatInterval = Duration(seconds: 30);
 
   bool _hasIncomingOrder = false;
   bool get hasIncomingOrder => _hasIncomingOrder;
@@ -395,6 +403,7 @@ class DriverProvider extends ChangeNotifier {
         FirestoreOrderService.instance
             .setDriverOnline(true)
             .catchError((e) => debugPrint('[Firestore] setOnline failed: $e'));
+        _registerPushToken();
       } else {
         // Mock mode: simulate incoming order after short delay
         Future.delayed(const Duration(seconds: 2), () {
@@ -600,8 +609,25 @@ class DriverProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // When the app is terminated while the driver is online, best-effort flip
+  // their doc to offline so the customer app stops counting them immediately
+  // rather than waiting out the heartbeat-staleness window. NOTE: Android does
+  // not reliably deliver `detached` on a hard swipe-kill — the heartbeat
+  // staleness in the customer app (_kDriverStaleAfter) remains the real
+  // backstop; this just makes the common graceful-close case instant.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached && _isOnline && kUseFirebase) {
+      FirestoreOrderService.instance
+          .setDriverOnline(false)
+          .catchError((e) => debugPrint('[Firestore] setOffline (detached) failed: $e'));
+    }
+    super.didChangeAppLifecycleState(state);
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _availableOrdersSub?.cancel();
     _incomingCancelSub?.cancel();
     for (final sub in _activeOrderSubs.values) {
@@ -913,6 +939,26 @@ class DriverProvider extends ChangeNotifier {
     _heartbeat = null;
   }
 
+  // Save this driver's FCM token (and keep it fresh on rotation) so the vendor
+  // app can alert them to new deliveries. Best-effort.
+  bool _pushRefreshHooked = false;
+  void _registerPushToken() {
+    NotificationService.instance.currentToken().then((token) {
+      if (token != null && token.isNotEmpty) {
+        FirestoreOrderService.instance
+            .saveFcmToken(token)
+            .catchError((e) => debugPrint('[push] saveFcmToken failed: $e'));
+      }
+    });
+    if (_pushRefreshHooked) return;
+    _pushRefreshHooked = true;
+    NotificationService.instance.onTokenRefresh((token) {
+      FirestoreOrderService.instance
+          .saveFcmToken(token)
+          .catchError((e) => debugPrint('[push] saveFcmToken refresh failed: $e'));
+    });
+  }
+
   /// Driver can't reach the customer at the drop-off. Raises the
   /// `customerUnreachable` signal (status untouched) so the vendor/customer
   /// apps can prompt a response; one-shot per order.
@@ -1040,8 +1086,16 @@ class DriverProvider extends ChangeNotifier {
 
   void pingCustomer(String orderId) {
     final idx = _activeOrders.indexWhere((o) => o.id == orderId);
+    // Only push once per "near" phase — pingCustomerSent resets when the driver
+    // advances steps, so a fresh ping is allowed per leg but not on repeat taps.
+    final alreadyPinged = idx != -1 && _activeOrders[idx].pingCustomerSent;
     if (idx != -1) _activeOrders[idx].pingCustomerSent = true;
     notifyListeners();
+    if (!alreadyPinged && kUseFirebase) {
+      FirestoreOrderService.instance
+          .notifyCustomerDriverNear(orderId)
+          .catchError((e) => debugPrint('[push] pingCustomer failed: $e'));
+    }
   }
 
   // Guards against any UI surface calling this twice for the same order in

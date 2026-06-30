@@ -5,6 +5,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'push/order_push.dart';
+
 // Set to true after Firebase setup. See PLAN.md.
 const kUseFirebase = true;
 
@@ -226,6 +228,40 @@ class FirestoreOrderService {
 
   CollectionReference<Map<String, dynamic>> get _driversCol =>
       FirebaseFirestore.instance.collection('drivers');
+
+  CollectionReference<Map<String, dynamic>> get _usersCol =>
+      FirebaseFirestore.instance.collection('users');
+
+  /// Save/refresh this driver's FCM token so the vendor app can alert them to
+  /// new deliveries. Stored on the driver's own doc (merge — leaves isOnline /
+  /// isSuspended untouched, satisfying the drivers update rule).
+  Future<void> saveFcmToken(String token) async {
+    if (kDriverId.isEmpty || token.isEmpty) return;
+    await _driversCol.doc(kDriverId).set({'fcmToken': token}, SetOptions(merge: true));
+  }
+
+  /// The customer's FCM token for [orderId] — reads the order's userId, then
+  /// that user's token, so the driver can push delivery-status updates.
+  Future<String?> fetchCustomerFcmTokenForOrder(String orderId) async {
+    final orderSnap = await _col.doc(orderId).get();
+    final userId = orderSnap.data()?['userId'];
+    if (userId is! String || userId.isEmpty) return null;
+    final userSnap = await _usersCol.doc(userId).get();
+    final token = userSnap.data()?['fcmToken'];
+    return token is String && token.isNotEmpty ? token : null;
+  }
+
+  /// The vendor's FCM token for [orderId] — reads the order's vendorId then the
+  /// restaurant doc's token, so the driver can tell the vendor "order picked up".
+  Future<String?> fetchVendorFcmTokenForOrder(String orderId) async {
+    final orderSnap = await _col.doc(orderId).get();
+    final vendorId = orderSnap.data()?['vendorId'];
+    if (vendorId is! String || vendorId.isEmpty) return null;
+    final restSnap =
+        await FirebaseFirestore.instance.collection('restaurants').doc(vendorId).get();
+    final token = restSnap.data()?['fcmToken'];
+    return token is String && token.isNotEmpty ? token : null;
+  }
 
   Future<DriverProfile?> fetchDriverProfile(String uid) async {
     final snap = await _driversCol.doc(uid).get();
@@ -499,6 +535,12 @@ class FirestoreOrderService {
         'noDriversAvailable': false,
       });
     });
+    // A driver committed → the kitchen starts. Let the customer know.
+    OrderPush.notifyCustomer(
+      orderId: orderId,
+      title: 'A driver is on it 👨‍🍳',
+      body: 'Your order has been accepted and is being prepared.',
+    ).catchError((e) => debugPrint('[push] notifyCustomer (accept) failed: $e'));
   }
 
   /// Live (status, cancelReason) for a single order — watched for the whole
@@ -639,12 +681,47 @@ class FirestoreOrderService {
     );
   }
 
+  /// Driver tapped "I'm near" — push the customer to be ready. No status
+  /// change; purely a heads-up notification.
+  Future<void> notifyCustomerDriverNear(String orderId) {
+    return OrderPush.notifyCustomer(
+      orderId: orderId,
+      title: 'Your driver is almost there 🛵',
+      body: 'Please be ready to collect your order.',
+    );
+  }
+
   /// Update delivery step status.
   Future<void> updateDeliveryStatus(String orderId, String status) async {
     await _col.doc(orderId).update({
       'status': status,
       if (status == 'delivered') 'deliveredAt': FieldValue.serverTimestamp(),
     });
+    _notifyCustomerOfStatus(orderId, status);
+  }
+
+  // Push a customer-facing message for delivery-status transitions the driver
+  // drives. Fire-and-forget — a failed push must never fail the status write.
+  void _notifyCustomerOfStatus(String orderId, String status) {
+    final (title, body) = switch (status) {
+      'pickedUp' || 'enRoute' => ('Out for delivery 🛵', 'Your order is on its way.'),
+      'arrivedAtCustomer' => ('Your driver has arrived 📍', 'Your driver is at your location.'),
+      'delivered' => ('Delivered ✅', 'Enjoy your order! Tap to rate it.'),
+      _ => ('', ''),
+    };
+    if (title.isNotEmpty) {
+      OrderPush.notifyCustomer(orderId: orderId, title: title, body: body)
+          .catchError((e) => debugPrint('[push] notifyCustomer failed: $e'));
+    }
+    // Tell the vendor the moment the driver collects the order, so their
+    // dashboard's "out for delivery" move is backed by a push too.
+    if (status == 'pickedUp') {
+      OrderPush.notifyVendor(
+        orderId: orderId,
+        title: 'Order picked up',
+        body: 'The driver has collected the order and is on the way.',
+      ).catchError((e) => debugPrint('[push] notifyVendor (pickedUp) failed: $e'));
+    }
   }
 
   /// Flags that the driver is physically at the restaurant — kept separate

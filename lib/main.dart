@@ -8,6 +8,10 @@ import 'core/providers/driver_provider.dart';
 import 'features/splash/splash_screen.dart';
 import 'firebase_options.dart';
 import 'services/firestore_order_service.dart';
+import 'services/push/notification_service.dart';
+
+/// Drives notification-tap navigation from outside the widget tree.
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,6 +20,14 @@ Future<void> main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
+    // Set up FCM receipt + local-notification display (loud new-delivery
+    // alerts). The driver's token is saved when they go online.
+    await NotificationService.instance.init();
+    // Tapping a notification brings the driver back to the main shell, where
+    // active/available orders are shown.
+    NotificationService.instance.onNotificationTap = (_) {
+      rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+    };
   }
 
   // Read the saved theme before building so the map initializes in the correct
@@ -42,6 +54,7 @@ class UniEatsDriverApp extends StatelessWidget {
     final themeP = context.watch<ThemeProvider>();
     return MaterialApp(
       title: 'Uni Eats Driver',
+      navigatorKey: rootNavigatorKey,
       debugShowCheckedModeBanner: false,
       themeMode: themeP.themeMode,
       theme: AppTheme.light,
