@@ -13,6 +13,8 @@ import '../../core/theme/theme_provider.dart';
 import '../../services/firestore_order_service.dart';
 import '../../services/order_statement_service.dart';
 import '../auth/login_screen.dart';
+import 'policies.dart';
+import 'policy_viewer_screen.dart';
 
 /// Mode-aware color set, resolved once per build and threaded through the
 /// child widgets. Centralizing this is what makes the screen read correctly
@@ -375,6 +377,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   // ---- External links ------------------------------------------------------
 
+  /// Maps a policy document reference to a representative icon for its row.
+  IconData _policyIcon(String ref) {
+    switch (ref) {
+      case 'UE-POL-DRV-001':
+        return Icons.shield_outlined; // Driver Safety & Data Privacy
+      case 'UE-POL-PRIV-001':
+        return Icons.lock_outline; // Data Protection & Privacy
+      case 'UE-POL-AUP-001':
+        return Icons.gavel_outlined; // Acceptable Use
+      case 'UE-POL-FOOD-001':
+        return Icons.restaurant_outlined; // Food Safety & Handling
+      case 'UE-POL-REF-001':
+        return Icons.receipt_long_outlined; // Refund & Cancellation
+      default:
+        return Icons.description_outlined;
+    }
+  }
+
   Future<void> _launch(Uri uri, String failMsg) async {
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -600,22 +620,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     'No email app found. Reach us at support@unieats.qa',
                   ),
                 ),
-                _Row(
-                  palette: p,
-                  icon: Icons.privacy_tip_outlined,
-                  label: 'Privacy Policy',
-                  onTap: () => _launch(
-                    Uri.parse('https://unieats.qa/privacy'),
-                    'Could not open the privacy policy.',
+              ],
+            ),
+
+            // Legal & Policies — official Uni Eats policy documents,
+            // readable offline (see policies.dart / PolicyViewerScreen).
+            _Section(
+              palette: p,
+              title: 'Legal & Policies',
+              children: [
+                for (final policy in kDriverPolicies)
+                  _Row(
+                    palette: p,
+                    icon: _policyIcon(policy.ref),
+                    label: policy.title,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => PolicyViewerScreen(policy: policy),
+                      ),
+                    ),
                   ),
-                ),
-                _Row(
-                  palette: p,
-                  icon: Icons.info_outline,
-                  label: 'App Version',
-                  value: _version.isEmpty ? '…' : _version,
-                  muted: true,
-                ),
               ],
             ),
 
@@ -624,7 +648,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
               child: _LogoutButton(onConfirm: _logout),
             ),
-            const SizedBox(height: 40),
+            const SizedBox(height: 18),
+            // App version — conventional placement at the very bottom.
+            Center(
+              child: Text(
+                (_version.isEmpty || _version == '—')
+                    ? 'Uni Eats Driver'
+                    : 'Uni Eats Driver · v$_version',
+                style: TextStyle(fontSize: 11.5, color: p.sub),
+              ),
+            ),
+            const SizedBox(height: 32),
           ],
         ),
       ),
@@ -939,7 +973,6 @@ class _Row extends StatelessWidget {
   final Widget? trailing;
   final VoidCallback? onTap;
   final bool locked;
-  final bool muted;
   const _Row({
     required this.palette,
     required this.icon,
@@ -948,7 +981,6 @@ class _Row extends StatelessWidget {
     this.trailing,
     this.onTap,
     this.locked = false,
-    this.muted = false,
   });
 
   @override
@@ -962,7 +994,7 @@ class _Row extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
           child: Row(
             children: [
-              Icon(icon, size: 19, color: muted ? palette.sub : palette.text),
+              Icon(icon, size: 19, color: palette.text),
               const SizedBox(width: 12),
               Text(label,
                   style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: palette.text)),
