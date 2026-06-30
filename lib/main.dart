@@ -18,10 +18,14 @@ Future<void> main() async {
     );
   }
 
+  // Read the saved theme before building so the map initializes in the correct
+  // mode from frame one (GoogleMap applies style/buildings only at init).
+  final savedDark = await ThemeProvider.loadSaved();
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => ThemeProvider(isDark: savedDark)),
         ChangeNotifierProvider(create: (_) => DriverAuthProvider()),
         ChangeNotifierProvider(create: (_) => DriverProvider()),
       ],
