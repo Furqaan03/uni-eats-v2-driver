@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/providers/driver_auth_provider.dart';
 import '../../core/providers/driver_provider.dart';
@@ -13,6 +12,7 @@ import '../../core/theme/theme_provider.dart';
 import '../../services/firestore_order_service.dart';
 import '../../services/order_statement_service.dart';
 import '../auth/login_screen.dart';
+import 'help_support_screen.dart';
 import 'policies.dart';
 import 'policy_viewer_screen.dart';
 
@@ -395,14 +395,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  Future<void> _launch(Uri uri, String failMsg) async {
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok) _toast(failMsg);
-    } catch (_) {
-      _toast(failMsg);
-    }
-  }
 
   // ---- Build ---------------------------------------------------------------
 
@@ -613,11 +605,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   palette: p,
                   icon: Icons.help_outline,
                   label: 'Help & Support',
-                  onTap: () => _launch(
-                    Uri(scheme: 'mailto', path: 'support@unieats.qa', queryParameters: {
-                      'subject': 'Driver app support',
-                    }),
-                    'No email app found. Reach us at support@unieats.qa',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => HelpSupportScreen(
+                        driverName: profile?.name ?? '',
+                        driverId: profile?.id ?? '',
+                        appVersion: _version,
+                      ),
+                    ),
                   ),
                 ),
               ],
