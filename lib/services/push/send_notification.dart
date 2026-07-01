@@ -44,24 +44,24 @@ class SendNotification {
     Map<String, String> data = const {},
   }) async {
     if (!PushConfig.isConfigured) {
-      developer.log('[push] skipped — serviceAccountJsonUrl not set');
+      developer.log('[push] skipped — serviceAccountAssetPath not set');
       return;
     }
     if (token.isEmpty) return;
 
+    // Deliberately data-only (no top-level `notification` block): Android
+    // only auto-displays `android.notification` overrides when a base
+    // `notification` block is also present, so this would otherwise be
+    // silently dropped. We render it ourselves via flutter_local_notifications.
     final message = {
       'token': token,
-      'data': {...data, 'isNewOrder': loud ? 'true' : 'false'},
-      'android': {
-        'priority': 'high',
-        'notification': {
-          'channel_id': loud ? PushConfig.ordersChannelId : PushConfig.defaultChannelId,
-          'title': title,
-          'body': body,
-          if (loud) 'sound': PushConfig.orderSoundResource,
-          'click_action': 'FLUTTER_NOTIFICATION_CLICK',
-        },
+      'data': {
+        ...data,
+        'title': title,
+        'body': body,
+        'isNewOrder': loud ? 'true' : 'false',
       },
+      'android': {'priority': 'high'},
     };
 
     try {
