@@ -942,20 +942,25 @@ class DriverProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Save this driver's FCM token (and keep it fresh on rotation) so the vendor
   // app can alert them to new deliveries. Best-effort.
   bool _pushRefreshHooked = false;
+  // Last token this device wrote, so a rotation can prune the dead one.
+  String? _lastPushToken;
   void _registerPushToken() {
     NotificationService.instance.currentToken().then((token) {
-      if (token != null && token.isNotEmpty) {
-        FirestoreOrderService.instance
-            .saveFcmToken(token)
-            .catchError((e) => debugPrint('[push] saveFcmToken failed: $e'));
-      }
+      if (token == null || token.isEmpty) return;
+      _lastPushToken = token;
+      FirestoreOrderService.instance
+          .saveFcmToken(token)
+          .catchError((e) => debugPrint('[push] saveFcmToken failed: $e'));
     });
     if (_pushRefreshHooked) return;
     _pushRefreshHooked = true;
     NotificationService.instance.onTokenRefresh((token) {
+      if (token.isEmpty) return;
+      final old = _lastPushToken;
+      _lastPushToken = token;
       FirestoreOrderService.instance
-          .saveFcmToken(token)
-          .catchError((e) => debugPrint('[push] saveFcmToken refresh failed: $e'));
+          .replaceFcmToken(oldToken: old, newToken: token)
+          .catchError((e) => debugPrint('[push] replaceFcmToken failed: $e'));
     });
   }
 
