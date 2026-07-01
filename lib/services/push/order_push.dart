@@ -12,10 +12,10 @@ class OrderPush {
     required String title,
     required String body,
   }) async {
-    final token = await FirestoreOrderService.instance.fetchCustomerFcmTokenForOrder(orderId);
-    if (token == null) return;
-    await SendNotification.toToken(
-      token: token,
+    final tokens = await FirestoreOrderService.instance.fetchCustomerFcmTokensForOrder(orderId);
+    if (tokens.isEmpty) return;
+    await SendNotification.toTokens(
+      tokens: tokens,
       title: title,
       body: body,
       data: {'orderId': orderId, 'type': 'order_status'},
@@ -28,10 +28,10 @@ class OrderPush {
     required String title,
     required String body,
   }) async {
-    final token = await FirestoreOrderService.instance.fetchVendorFcmTokenForOrder(orderId);
-    if (token == null) return;
-    await SendNotification.toToken(
-      token: token,
+    final tokens = await FirestoreOrderService.instance.fetchVendorFcmTokensForOrder(orderId);
+    if (tokens.isEmpty) return;
+    await SendNotification.toTokens(
+      tokens: tokens,
       title: title,
       body: body,
       data: {'orderId': orderId, 'type': 'order_status'},

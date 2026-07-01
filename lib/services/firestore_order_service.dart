@@ -267,34 +267,59 @@ class FirestoreOrderService {
       FirebaseFirestore.instance.collection('users');
 
   /// Save/refresh this driver's FCM token so the vendor app can alert them to
-  /// new deliveries. Stored on the driver's own doc (merge — leaves isOnline /
-  /// isSuspended untouched, satisfying the drivers update rule).
+  /// new deliveries. Uses arrayUnion so the driver's multiple devices coexist
+  /// (a single `fcmToken` field meant a new device / token rotation overwrote
+  /// the previous one). Merge leaves isOnline / isSuspended untouched,
+  /// satisfying the drivers update rule.
   Future<void> saveFcmToken(String token) async {
     if (kDriverId.isEmpty || token.isEmpty) return;
-    await _driversCol.doc(kDriverId).set({'fcmToken': token}, SetOptions(merge: true));
+    await _driversCol.doc(kDriverId).set({
+      'fcmTokens': FieldValue.arrayUnion([token]),
+    }, SetOptions(merge: true));
   }
 
-  /// The customer's FCM token for [orderId] — reads the order's userId, then
-  /// that user's token, so the driver can push delivery-status updates.
-  Future<String?> fetchCustomerFcmTokenForOrder(String orderId) async {
+  /// The customer's FCM tokens for [orderId] — read from the token set the
+  /// customer app snapshots onto the ORDER doc at creation. Reading users/{uid}
+  /// directly is denied for the driver (that collection is self/admin-read
+  /// only — see firestore.rules), so the order doc carries the tokens instead.
+  Future<List<String>> fetchCustomerFcmTokensForOrder(String orderId) async {
     final orderSnap = await _col.doc(orderId).get();
-    final userId = orderSnap.data()?['userId'];
-    if (userId is! String || userId.isEmpty) return null;
-    final userSnap = await _usersCol.doc(userId).get();
-    final token = userSnap.data()?['fcmToken'];
-    return token is String && token.isNotEmpty ? token : null;
+    final embedded = orderSnap.data()?['customerFcmTokens'];
+    final set = <String>{};
+    if (embedded is List) {
+      for (final t in embedded) {
+        if (t is String && t.isNotEmpty) set.add(t);
+      }
+    }
+    return set.toList();
   }
 
-  /// The vendor's FCM token for [orderId] — reads the order's vendorId then the
-  /// restaurant doc's token, so the driver can tell the vendor "order picked up".
-  Future<String?> fetchVendorFcmTokenForOrder(String orderId) async {
+  /// The vendor's FCM tokens for [orderId] — reads the order's vendorId then the
+  /// restaurant doc's token set, so the driver can tell the vendor "picked up"
+  /// on every device the restaurant is signed in on.
+  Future<List<String>> fetchVendorFcmTokensForOrder(String orderId) async {
     final orderSnap = await _col.doc(orderId).get();
     final vendorId = orderSnap.data()?['vendorId'];
-    if (vendorId is! String || vendorId.isEmpty) return null;
+    if (vendorId is! String || vendorId.isEmpty) return const [];
     final restSnap =
         await FirebaseFirestore.instance.collection('restaurants').doc(vendorId).get();
-    final token = restSnap.data()?['fcmToken'];
-    return token is String && token.isNotEmpty ? token : null;
+    return _tokensOf(restSnap.data());
+  }
+
+  /// Extracts the device-token set from an entity doc — the `fcmTokens` array
+  /// plus any legacy single `fcmToken`, deduped.
+  static List<String> _tokensOf(Map<String, dynamic>? data) {
+    if (data == null) return const [];
+    final set = <String>{};
+    final arr = data['fcmTokens'];
+    if (arr is List) {
+      for (final t in arr) {
+        if (t is String && t.isNotEmpty) set.add(t);
+      }
+    }
+    final single = data['fcmToken'];
+    if (single is String && single.isNotEmpty) set.add(single);
+    return set.toList();
   }
 
   Future<DriverProfile?> fetchDriverProfile(String uid) async {
