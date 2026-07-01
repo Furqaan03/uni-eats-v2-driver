@@ -10,6 +10,20 @@ import 'push/order_push.dart';
 // Set to true after Firebase setup. See PLAN.md.
 const kUseFirebase = true;
 
+/// Data environment (mirrors the admin dashboard's Live/Test switch).
+///   test → unprefixed collections (all current data). Default.
+///   live → `live_`-prefixed collections (real launch data), kept fully separate.
+/// Flip [current] to [DataEnv.live] at real launch. Only TOP-LEVEL collection
+/// names are prefixed — subcollections inherit their parent's namespace.
+enum DataEnv { test, live }
+
+class AppEnv {
+  AppEnv._();
+  static const DataEnv current = DataEnv.test;
+  static String get _prefix => current == DataEnv.live ? 'live_' : '';
+  static String col(String name) => '$_prefix$name';
+}
+
 /// Set by DriverAuthProvider once a real driver signs in. Falls back to a
 /// placeholder only for the brief moment before auth resolves at startup.
 String kDriverId = '';
@@ -258,10 +272,10 @@ class FirestoreOrderService {
   static final FirestoreOrderService instance = FirestoreOrderService._();
 
   CollectionReference<Map<String, dynamic>> get _col =>
-      FirebaseFirestore.instance.collection('orders');
+      FirebaseFirestore.instance.collection(AppEnv.col('orders'));
 
   CollectionReference<Map<String, dynamic>> get _driversCol =>
-      FirebaseFirestore.instance.collection('drivers');
+      FirebaseFirestore.instance.collection(AppEnv.col('drivers'));
 
   /// Save/refresh this driver's FCM token so the vendor app can alert them to
   /// new deliveries. Uses arrayUnion so the driver's multiple devices coexist
@@ -311,7 +325,7 @@ class FirestoreOrderService {
     final vendorId = orderSnap.data()?['vendorId'];
     if (vendorId is! String || vendorId.isEmpty) return const [];
     final restSnap =
-        await FirebaseFirestore.instance.collection('restaurants').doc(vendorId).get();
+        await FirebaseFirestore.instance.collection(AppEnv.col('restaurants')).doc(vendorId).get();
     return _tokensOf(restSnap.data());
   }
 
@@ -677,7 +691,7 @@ class FirestoreOrderService {
   /// Records that a driver declined an offered order, for later analysis —
   /// doesn't change the order itself (it stays available for other drivers).
   Future<void> recordDecline(String orderId, String reason) async {
-    await FirebaseFirestore.instance.collection('orderDeclines').add({
+    await FirebaseFirestore.instance.collection(AppEnv.col('orderDeclines')).add({
       'orderId': orderId,
       'driverId': kDriverId,
       'driverName': kDriverName,
@@ -1082,7 +1096,7 @@ class FirestoreOrderService {
   /// Update the driver's online status in /drivers collection.
   Future<void> setDriverOnline(bool isOnline) async {
     await FirebaseFirestore.instance
-        .collection('drivers')
+        .collection(AppEnv.col('drivers'))
         .doc(kDriverId)
         .set({
       'isOnline': isOnline,
