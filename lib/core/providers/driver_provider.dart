@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/firestore_order_service.dart';
 import '../../services/push/notification_service.dart';
 
@@ -182,6 +184,24 @@ class DriverNotification {
     required this.time,
     this.read = false,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'body': body,
+        'icon': icon,
+        'time': time.toIso8601String(),
+        'read': read,
+      };
+
+  factory DriverNotification.fromJson(Map<String, dynamic> j) => DriverNotification(
+        id: j['id'] as String? ?? '',
+        title: j['title'] as String? ?? '',
+        body: j['body'] as String? ?? '',
+        icon: j['icon'] as String? ?? '🔔',
+        time: DateTime.tryParse(j['time'] as String? ?? '') ?? DateTime.now(),
+        read: j['read'] as bool? ?? false,
+      );
 }
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -189,6 +209,7 @@ class DriverNotification {
 class DriverProvider extends ChangeNotifier with WidgetsBindingObserver {
   DriverProvider() {
     WidgetsBinding.instance.addObserver(this);
+    _loadNotifications();
   }
 
   bool _isOnline = false;
@@ -343,46 +364,88 @@ class DriverProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Qatar National Bank account" payout notification and a fake "Bonus
   // Zone" promo every single app session, regardless of whether either was
   // true.
-  final List<DriverNotification> _notifications = [
-    DriverNotification(
-      id: '1',
-      title: 'Welcome to Uni Eats Driver!',
-      body: 'Your account is approved. Go online to start receiving orders.',
-      icon: '🎉',
-      time: DateTime.now().subtract(const Duration(minutes: 5)),
-      read: false,
-    ),
-  ];
+  // Starts EMPTY and hydrates from disk — no hardcoded seed. A seeded "Welcome"
+  // entry reappeared on every launch and could never be dismissed for good,
+  // while real notifications (in-memory only) were lost on force-close.
+  final List<DriverNotification> _notifications = [];
+
+  static const _notifPrefsKey = 'driver_notifications_v1';
 
   List<DriverNotification> get notifications => List.unmodifiable(_notifications);
   int get unreadCount => _notifications.where((n) => !n.read).length;
+
+  Future<void> _loadNotifications() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_notifPrefsKey);
+      if (raw == null || raw.isEmpty) return;
+      final loaded = (jsonDecode(raw) as List)
+          .map((e) => DriverNotification.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+      // Preserve anything added before the async load returned (newest first).
+      _notifications
+        ..addAll(loaded)
+        ..sort((a, b) => b.time.compareTo(a.time));
+      notifyListeners();
+    } catch (_) {/* start empty on any decode error */}
+  }
+
+  Future<void> _persistNotifications() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _notifPrefsKey,
+        jsonEncode(_notifications.map((n) => n.toJson()).toList()),
+      );
+    } catch (_) {/* best-effort */}
+  }
+
+  /// Wipes persisted notifications — call on sign-out so a shared device
+  /// doesn't show the previous driver's notifications to the next.
+  Future<void> clearPersistedNotifications() async {
+    _notifications.clear();
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_notifPrefsKey);
+    } catch (_) {/* best-effort */}
+  }
 
   void markAllRead() {
     for (final n in _notifications) {
       n.read = true;
     }
     notifyListeners();
+    _persistNotifications();
   }
 
   void markRead(String id) {
     final idx = _notifications.indexWhere((n) => n.id == id);
     if (idx != -1) _notifications[idx].read = true;
     notifyListeners();
+    _persistNotifications();
   }
 
   void removeNotification(String id) {
     _notifications.removeWhere((n) => n.id == id);
     notifyListeners();
+    _persistNotifications();
   }
 
   void clearAllNotifications() {
     _notifications.clear();
     notifyListeners();
+    _persistNotifications();
   }
 
   void addNotification(DriverNotification notification) {
     _notifications.insert(0, notification);
+    // Cap stored history so the list can't grow without bound.
+    if (_notifications.length > 50) {
+      _notifications.removeRange(50, _notifications.length);
+    }
     notifyListeners();
+    _persistNotifications();
   }
 
   void toggleOnline() {

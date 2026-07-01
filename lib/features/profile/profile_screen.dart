@@ -674,6 +674,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _logout() async {
+    // Wipe the in-app notification center so the next driver to sign in on this
+    // device doesn't inherit these notifications.
+    context.read<DriverProvider>().clearPersistedNotifications();
     await context.read<DriverAuthProvider>().signOut();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(

@@ -263,9 +263,6 @@ class FirestoreOrderService {
   CollectionReference<Map<String, dynamic>> get _driversCol =>
       FirebaseFirestore.instance.collection('drivers');
 
-  CollectionReference<Map<String, dynamic>> get _usersCol =>
-      FirebaseFirestore.instance.collection('users');
-
   /// Save/refresh this driver's FCM token so the vendor app can alert them to
   /// new deliveries. Uses arrayUnion so the driver's multiple devices coexist
   /// (a single `fcmToken` field meant a new device / token rotation overwrote
